@@ -23,7 +23,7 @@
 
 """
 
-import random, time
+import random, time, re
 import DIRAC
 
 from numpy.random import poisson
@@ -35,9 +35,12 @@ from DIRAC.Core.Base.AgentModule                       import AgentModule
 from DIRAC.Core.Utilities.ThreadPool                   import ThreadPool
 from DIRAC.WorkloadManagementSystem.DB.TaskQueueDB     import maxCPUSegments
 from DIRAC.WorkloadManagementSystem.Client.ServerUtils import taskQueueDB
+from DIRAC.WorkloadManagementSystem.Client.ServerUtils import jobDB
 
 from BigDataDIRAC.Resources.BigData.BigDataDirector           import BigDataDirector
 from BigDataDIRAC.WorkloadManagementSystem.Client.ServerUtils import BigDataDB
+
+from DIRAC.Interfaces.API.Dirac import Dirac
 
 __RCSID__ = "$Id: $"
 
@@ -65,6 +68,7 @@ class BigDataJobScheduler( AgentModule ):
     self.pools = {}
 
     self.directorDict = {}
+    self.pendingTaskQueueJobs = {}
 
     self.callBackLock = threading.Lock()
 
@@ -77,134 +81,229 @@ class BigDataJobScheduler( AgentModule ):
       3.- Submit Jobs
     """
 
+
     self.__checkSubmitPools()
+
+    bigDataJobsToSubmit = {}
+    bigDataJobIdsToSubmit = {}
 
     for directorName, directorDict in self.directors.items():
       self.log.verbose( 'Checking Director:', directorName )
+      self.log.verbose( 'RunningEndPoints:', directorDict['director'].runningEndPoints )
+      for runningEndPointName in directorDict['director'].runningEndPoints:
+        runningEndPointDict = directorDict['director'].runningEndPoints[runningEndPointName]
+        NameNode = runningEndPointDict['NameNode']
+        jobsByEndPoint = 0
+        result = BigDataDB.getBigDataJobsByStatusAndEndpoint( 'Submitted', NameNode )
+        if result['OK']:
+          jobsByEndPoint += len( result['Value'] )
+        result = BigDataDB.getBigDataJobsByStatusAndEndpoint( 'Running', NameNode )
+        if result['OK']:
+          jobsByEndPoint += len( result['Value'] )
+        self.log.verbose( 'Checking Jobs By EndPoint %s:' % jobsByEndPoint )
+        jobLimitsEndPoint = runningEndPointDict['LimitQueueJobsEndPoint']
 
-      for runningPodName in directorDict['director'].runningPods:
-        runningPodDict = directorDict['director'].runningPods[runningPodName]
-        softName = runningPodDict['software']
-        jobsBySite = 0
-        result = BigDataDB.getBigDataJobsByStatus( 'Mapping' )
-        if result['OK'] and softName in result['Value']:
-          jobsBySite += len( result['Value'][softName] )
-        result = BigDataDB.getBigDataJobsByStatus( 'Reduccing' )
-        if result['OK'] and softName in result['Value']:
-          jobsBySite += len( result['Value'][softName] )
-        result = BigDataDB.getBigDataJobsByStatus( 'Queue' )
-        if result['OK'] and softName in result['Value']:
-          jobsBySite += len( result['Value'][softName] )
-        self.log.verbose( 'Checking Image %s:' % softName, jobsBySite )
-        jobLimitsPod = runningPodDict['LimitJobQueue']
-        if instances >= maxInstances:
-          self.log.info( '%s >= %s Running jobs reach job limits for runningPod: %s, skipping' % ( instances, jobLimitsPod, runningPodName ) )
+        bigDataJobs = 0
+        if jobsByEndPoint >= jobLimitsEndPoint:
+          self.log.info( '%s >= %s Running jobs reach job limits: %s, skipping' % ( jobsByEndPoint, jobLimitsEndPoint, runningEndPointName ) )
+          continue
+        else:
+          bigDataJobs = jobLimitsEndPoint - jobsByEndPoint
+        requirementsDict = runningEndPointDict['Requirements']
+
+        self.log.info( 'Requirements Dict: ', requirementsDict )
+        result = taskQueueDB.getMatchingTaskQueues( requirementsDict )
+        if not result['OK']:
+          self.log.error( 'Could not retrieve TaskQueues from TaskQueueDB', result['Message'] )
+          return result
+
+        taskQueueDict = result['Value']
+        self.log.info( 'Task Queues Dict: ', taskQueueDict )
+        jobs = 0
+        priority = 0
+        cpu = 0
+        jobsID = 0
+        self.log.info( 'Pending Jobs from TaskQueue, which not matching before: ', self.pendingTaskQueueJobs )
+        for tq in taskQueueDict:
+          jobs += taskQueueDict[tq]['Jobs']
+          priority += taskQueueDict[tq]['Priority']
+          cpu += taskQueueDict[tq]['Jobs'] * taskQueueDict[tq]['CPUTime']
+
+          #Matching of Jobs with BigData Softwares
+          #This process is following the sequence:
+          #Retrieve a job from taskqueueDict
+          #Get job name and try to match with the resources        
+          #If not match store the var pendingTaskQueueJobs for the
+          #next iteration
+          #
+          #This matching is doing with the following JobName Pattern
+          # NameSoftware _ SoftwareVersion _ HighLanguageName _ HighLanguageVersion _ DataSetName          
+          #extract a job from the TaskQueue
+          if tq not in self.pendingTaskQueueJobs.keys():
+            self.pendingTaskQueueJobs[tq] = {}
+          getJobFromTaskQueue = taskQueueDB.matchAndGetJob( taskQueueDict[tq] )
+          if not getJobFromTaskQueue['OK']:
+            self.log.error( 'Could not get Job and FromTaskQueue', getJobFromTaskQueue['Message'] )
+            return getJobFromTaskQueue
+
+          #get the job info and get the job attributes and 
+          #do the match with the runningEndPoint
+          jobInfo = getJobFromTaskQueue['Value']
+          jobID = jobInfo['jobId']
+          jobAttrInfo = jobDB.getJobAttributes( jobID )
+          jobParamsInfo = jobDB.getJobParameters( jobID )
+          jobParamsInfo = jobDB.getAtticJobParameters( jobID )
+          jobParamsInfo = jobDB.getInputData( jobID )
+
+          if not jobAttrInfo['OK']:
+            self.log.error( 'Could not get Job Attributes', jobAttrInfo['Message'] )
+            return jobAttrInfo
+          jobInfoUniq = jobAttrInfo['Value']
+          jobName = jobInfoUniq['JobName']
+          self.pendingTaskQueueJobs[tq][jobID] = jobName
+          jobsToSubmit = self.matchingJobsForBDSubmission( jobName,
+                                                       runningEndPointName,
+                                                       runningEndPointDict['BigDataSoftware'],
+                                                       runningEndPointDict['BigDataSoftwareVersion'],
+                                                       runningEndPointDict['HighLevelLanguage']['HLLName'],
+                                                       runningEndPointDict['HighLevelLanguage']['HLLVersion'] )
+          if ( jobsToSubmit == "OK" ):
+            if directorName not in bigDataJobsToSubmit:
+              bigDataJobsToSubmit[directorName] = {}
+            if runningEndPointName not in bigDataJobsToSubmit[directorName]:
+              bigDataJobsToSubmit[directorName][runningEndPointName] = {}
+            bigDataJobsToSubmit[directorName][runningEndPointName] = { 'JobId': jobID,
+                                                        'JobName': jobName,
+                                                        'TQPriority': priority,
+                                                        'CPUTime': cpu,
+                                                        'BigDataEndpoint': runningEndPointName,
+                                                        'BigDataEndpointNameNode': runningEndPointDict['NameNode'],
+                                                        'BdSoftware': runningEndPointDict['BigDataSoftware'],
+                                                        'BdSoftwareVersion': runningEndPointDict['BigDataSoftwareVersion'],
+                                                        'HLLName' : runningEndPointDict['HighLevelLanguage']['HLLName'],
+                                                        'HLLVersion' : runningEndPointDict['HighLevelLanguage']['HLLVersion'],
+                                                        'NumBigDataJobsAllowedToSubmit': bigDataJobs,
+                                                        'SiteName': runningEndPointDict['SiteName'],
+                                                        'PublicIP': runningEndPointDict['PublicIP'],
+                                                        'User': runningEndPointDict['User'],
+                                                        'Port': runningEndPointDict['Port'] }
+            del self.pendingTaskQueueJobs[tq][jobID]
+          else:
+            self.log.error( jobsToSubmit )
+        self.log.info( 'Pending Jobs from TaskQueue, which not matching after: ', self.pendingTaskQueueJobs )
+        for tq in self.pendingTaskQueueJobs.keys():
+          for jobid in self.pendingTaskQueueJobs[tq].keys():
+            #do the match with the runningEndPoint
+            jobsToSubmit = self.matchingJobsForBDSubmission( self.pendingTaskQueueJobs[tq][jobid],
+                                                             runningEndPointName,
+                                                             runningEndPointDict['BigDataSoftware'],
+                                                             runningEndPointDict['BigDataSoftwareVersion'],
+                                                             runningEndPointDict['HighLevelLanguage']['HLLName'],
+                                                             runningEndPointDict['HighLevelLanguage']['HLLVersion'] )
+            if ( jobsToSubmit == "OK" ):
+              if directorName not in bigDataJobsToSubmit:
+                bigDataJobsToSubmit[directorName] = {}
+              if runningEndPointName not in bigDataJobsToSubmit[directorName]:
+                bigDataJobsToSubmit[directorName][runningEndPointName] = {}
+              bigDataJobsToSubmit[directorName][runningEndPointName] = { 'JobId': jobid,
+                                                          'JobName': self.pendingTaskQueueJobs[tq][jobid],
+                                                          'TQPriority': priority,
+                                                          'CPUTime': cpu,
+                                                          'BigDataEndpoint': runningEndPointName,
+                                                          'BigDataEndpointNameNode': runningEndPointDict['NameNode'],
+                                                          'BdSoftware': runningEndPointDict['BigDataSoftware'],
+                                                          'BdSoftwareVersion': runningEndPointDict['BigDataSoftwareVersion'],
+                                                          'HLLName' : runningEndPointDict['HighLevelLanguage']['HLLName'],
+                                                          'HLLVersion' : runningEndPointDict['HighLevelLanguage']['HLLVersion'],
+                                                          'NumBigDataJobsAllowedToSubmit': bigDataJobs,
+                                                          'SiteName': runningEndPointDict['SiteName'],
+                                                          'PublicIP': runningEndPointDict['PublicIP'],
+                                                          'User': runningEndPointDict['User'],
+                                                          'Port': runningEndPointDict['Port'] }
+              del self.pendingTaskQueueJobs[tq][jobid]
+            else:
+             self.log.error( jobsToSubmit )
+        if not jobs and not self.pendingTaskQueueJobs:
+          self.log.info( 'No matching jobs for %s found, skipping' % NameNode )
           continue
 
-        endpointFound = False
-        BigDataEndpointsStr = runningPodDict['BigDataEndpoints']
-	      # random
-        BigDataEndpoints = [element for element in BigDataEndpointsStr.split( ',' )]
-        shuffle( BigDataEndpoints )
-        self.log.info( 'BigDataEndpoints random failover: %s' % BigDataEndpoints )
-        numJobsToSubmit = {}
-        for endpoint in BigDataEndpoints:
-          self.log.info( 'Checking to submit to: %s' % endpoint )
-          strMaxBigDataJobsEndpoint = gConfig.getValue( "/Resources/BigData/BigDataEndpoints/%s/%s" % ( endpoint, 'limitJobsEndPoint' ), "" )
-          if not strMaxBigDataJobsEndpoint:
-            self.log.info( 'CS BigDataEndpoint %s has no define limitJobsEndPoint option' % endpoint )
-            continue
-          self.log.info( 'CS BigDataEndpoint %s limitJobsEndPoint: %s' % ( endpoint, strMaxBigDataJobsEndpoint ) )
+        self.log.info( '___BigDataJobsTo Submit:', bigDataJobsToSubmit )
 
-          endpointBigDataJobs = 0
-          result = BigDataDB.getInstancesByStatusAndEndpoint( 'Mapping', endpoint )
-          if result['OK'] and softName in result['Value']:
-            endpointBigDataJobs += len( result['Value'][softName] )
-          result = BigDataDB.getInstancesByStatusAndEndpoint( 'Reduccing', endpoint )
-          if result['OK'] and softName in result['Value']:
-            endpointBigDataJobs += len( result['Value'][softName] )
-          result = BigDataDB.getInstancesByStatusAndEndpoint( 'Queue', endpoint )
-          if result['OK'] and softName in result['Value']:
-            endpointBigDataJobs += len( result['Value'][softName] )
-          self.log.info( 'CS BigDataEndpoint %s jobs: %s, limitJobsEndpoints: %s' % ( endpoint, endpointBigDataJobs, strMaxBigDataJobsEndpoint ) )
-          maxEndpointBigDataJobs = int( strMaxBigDataJobsEndpoint )
-          if endpointBigDataJobs < maxEndpointBigDataJobs:
-            numJobsToSubmit.update( {str( endpoint ): int( numBigDataJobs ) } )
-            endpointFound = True
-            break
+    for directorName, JobsToSubmitDict in bigDataJobsToSubmit.items():
+      for runningEndPointName, jobsToSubmitDict in JobsToSubmitDict.items():
+        if self.directors[directorName]['isEnabled']:
+          self.log.info( 'Requesting submission to %s of %s' % ( runningEndPointName, directorName ) )
 
-        if not endpointFound:
-          self.log.info( 'Skipping, from list %s; there is no endpoint with free slots found for jobs %s' % ( runningPodDict['BigDataEndpoints'], softName ) )
-          continue
+          director = self.directors[directorName]['director']
+          pool = self.pools[self.directors[directorName]['pool']]
 
-        imageRequirementsDict = runningPodDict['RequirementsDict']
-        #self.log.info( 'Image Requirements Dict: ', imageRequirementsDict )
-#        result = taskQueueDB.getMatchingTaskQueues( imageRequirementsDict )
-#        if not result['OK']:
-#          self.log.error( 'Could not retrieve TaskQueues from TaskQueueDB', result['Message'] )
-#          return result
-#        taskQueueDict = result['Value']
-#        #self.log.info( 'Task Queues Dict: ', taskQueueDict )
-#        jobs = 0
-#        priority = 0
-#        cpu = 0
-#        for tq in taskQueueDict:
-#          jobs += taskQueueDict[tq]['Jobs']
-#          priority += taskQueueDict[tq]['Priority']
-#          cpu += taskQueueDict[tq]['Jobs'] * taskQueueDict[tq]['CPUTime']
-#
-#        if not jobs:
-#          self.log.info( 'No matching jobs for %s found, skipping' % imageName )
-#          continue
-#
-#        if instances and ( cpu / instances ) < runningPodDict['CPUPerInstance']:
-#          self.log.info( 'Waiting CPU per Running instance %s < %s, skipping' % ( cpu / instances, runningPodDict['CPUPerInstance'] ) )
-#          continue
-#
-#        if directorName not in imagesToSubmit:
-#          imagesToSubmit[directorName] = {}
-#        if imageName not in imagesToSubmit[directorName]:
-#          imagesToSubmit[directorName][imageName] = {}
-#        numBigDataJobs = numVMsToSubmit.get( endpoint )
-#        imagesToSubmit[directorName][imageName] = { 'Jobs': jobs,
-#                                                    'TQPriority': priority,
-#                                                    'CPUTime': cpu,
-#                                                    'CloudEndpoint': endpoint,
-#                                                    'NumVMsToSubmit': numBigDataJobs,
-#                                                    'VMPolicy': vmPolicy,
-#                                                    'RunningPodName': runningPodName,
-#                                                    'VMPriority': runningPodDict['Priority'] }
-#
-#    for directorName, imageOfJobsToSubmitDict in imagesToSubmit.items():
-#      for imageName, jobsToSubmitDict in imageOfJobsToSubmitDict.items():
-#        if self.directors[directorName]['isEnabled']:
-#          self.log.info( 'Requesting submission of %s to %s' % ( imageName, directorName ) )
-#
-#          director = self.directors[directorName]['director']
-#          pool = self.pools[self.directors[directorName]['pool']]
-#
-#          endpoint = jobsToSubmitDict['CloudEndpoint']
-#          runningPodName = jobsToSubmitDict['RunningPodName']
-#          numBigDataJobs = jobsToSubmitDict['NumVMsToSubmit']
-#
-#          ret = pool.generateJobAndQueueIt( director.submitInstance,
-#                                            args = ( imageName, endpoint, numBigDataJobs, runningPodName ),
-#                                            oCallback = self.callBack,
-#                                            oExceptionCallback = director.exceptionCallBack,
-#                                            blocking = False )
-#
-#          if not ret['OK']:
-#            # Disable submission until next iteration
-#            self.directors[directorName]['isEnabled'] = False
-#          else:
-#            time.sleep( self.am_getOption( 'ThreadStartDelay' ) )
-#
-#    if 'Default' in self.pools:
-#      # only for those in "Default' thread Pool
-#      # for pool in self.pools:
-#      self.pools['Default'].processAllResults()
+          jobIDs = JobsToSubmitDict[runningEndPointName]['JobId']
+          jobName = JobsToSubmitDict[runningEndPointName]['JobName']
+          endpoint = JobsToSubmitDict[runningEndPointName]['BigDataEndpoint']
+          runningSiteName = JobsToSubmitDict[runningEndPointName]['SiteName']
+          NameNode = JobsToSubmitDict[runningEndPointName]['BigDataEndpointNameNode']
+          BigDataSoftware = JobsToSubmitDict[runningEndPointName]['BdSoftware']
+          BigDataSoftwareVersion = JobsToSubmitDict[runningEndPointName]['BdSoftwareVersion']
+          HLLName = JobsToSubmitDict[runningEndPointName]['HLLName']
+          HLLVersion = JobsToSubmitDict[runningEndPointName]['HLLVersion']
+          PublicIP = JobsToSubmitDict[runningEndPointName]['PublicIP']
+          User = JobsToSubmitDict[runningEndPointName]['User']
+          Port = JobsToSubmitDict[runningEndPointName]['Port']
+          numBigDataJobsAllowed = JobsToSubmitDict[runningEndPointName]['NumBigDataJobsAllowedToSubmit']
+
+          ret = pool.generateJobAndQueueIt( director.submitBigDataJobs,
+                                            args = ( endpoint, numBigDataJobsAllowed, runningSiteName, NameNode,
+                                                     BigDataSoftware, BigDataSoftwareVersion, HLLName, HLLVersion,
+                                                     PublicIP, Port, jobIDs, runningEndPointName, jobName, User ),
+                                            oCallback = self.callBack,
+                                            oExceptionCallback = director.exceptionCallBack,
+                                            blocking = False )
+          if not ret['OK']:
+            # Disable submission until next iteration
+            self.directors[directorName]['isEnabled'] = False
+          else:
+            time.sleep( self.am_getOption( 'ThreadStartDelay' ) )
+
+    if 'Default' in self.pools:
+      # only for those in "Default' thread Pool
+      # for pool in self.pools:
+      self.pools['Default'].processAllResults()
 
     return DIRAC.S_OK()
+
+  def matchingJobsForBDSubmission( self, jobName, bigdataendpoint, BigDataSoftware,
+                                   BigDataSoftwareVersion, HLLName, HLLVersion ):
+    """
+     Jobs matching, first with the dataset and the SITE, find in the Database the matching with the Dataset key
+     As the second step the endpoind is matched with the resulting SITES and in the case of 
+     was matching, in the third step the job will be matched with the bigdatasoft of the SITE.
+    """
+    self.log.info( "bigdataendpoint", bigdataendpoint )
+    self.log.info( "BigDataSoftware", BigDataSoftware )
+    self.log.info( "BigDataSoftwareVersion", BigDataSoftwareVersion )
+    self.log.info( "HLLName", HLLName )
+    self.log.info( "HLLVersion", HLLVersion )
+
+    jobNameSplitted = re.split( '_', jobName )
+
+    jobBigDataSoft = jobNameSplitted[1]
+    jobBigDataVersion = jobNameSplitted[2]
+    jobHHLSoft = jobNameSplitted[3]
+    jobHHLVersion = jobNameSplitted[4]
+    jobDataset = jobNameSplitted[5]
+
+    JobSiteNames = BigDataDB.getSiteNameByDataSet( jobDataset );
+    for SiteName in JobSiteNames:
+      if bigdataendpoint in SiteName:
+        if ( jobBigDataSoft == BigDataSoftware ) and ( jobBigDataVersion == BigDataSoftwareVersion ) and ( HLLName == "none" ):
+          return( "OK" )
+          self.submitPilotsForTaskQueue( x )
+        if ( jobBigDataSoft == BigDataSoftware ) and ( jobBigDataVersion == BigDataSoftwareVersion ) and ( HLLName == jobHHLSoft ) and ( HLLVersion == jobHHLVersion ):
+          return( "OK" )
+        else:
+          return "Dataset match with SiteName but Site doesn't have the software"
+
+    return "Dataset does not match with any Site"
 
   def submitPilotsForTaskQueue( self, taskQueueDict, waitingPilots ):
 
@@ -320,9 +419,9 @@ class BigDataJobScheduler( AgentModule ):
     """
 
     self.log.info( 'Creating Director for SubmitPool:', submitPool )
-    # 1. get the CloudDirector
+    # 1. get the BigDataDirector
 
-    director = CloudDirector( submitPool )
+    director = BigDataDirector( submitPool )
     directorName = '%sDirector' % submitPool
 
     self.log.info( 'Director Object instantiated:', directorName )
@@ -351,7 +450,7 @@ class BigDataJobScheduler( AgentModule ):
     # if submitPool == None then,
     #     disable all Directors
     # else
-    #    Update Configuration for the VMDirector of that SubmitPool
+    #    Update Configuration for the BigDataDirector of that SubmitPool
     if submitPool == None:
       self.workDir = self.am_getOption( 'WorkDirectory' )
       # By default disable all directors
@@ -362,7 +461,6 @@ class BigDataJobScheduler( AgentModule ):
       if submitPool not in self.directors:
         DIRAC.abort( -1, "Submit Pool not available", submitPool )
       director = self.directors[submitPool]['director']
-
       # Pass reference to our CS section so that defaults can be taken from there
       director.configure( self.am_getModuleParam( 'section' ), submitPool )
 
@@ -388,12 +486,12 @@ class BigDataJobScheduler( AgentModule ):
 
   def callBack( self, threadedJob, submitResult ):
     if not submitResult['OK']:
-      self.log.error( 'submitInstance Failed: ', submitResult['Message'] )
+      self.log.error( 'submitJobBigData Failed: ', submitResult['Message'] )
       if 'Value' in submitResult:
         self.callBackLock.acquire()
         self.callBackLock.release()
     else:
-      self.log.info( 'New Instance Submitted' )
+      self.log.info( 'New Job BigData Submitted' )
       self.callBackLock.acquire()
       self.callBackLock.release()
 

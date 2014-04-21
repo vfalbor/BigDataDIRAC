@@ -104,7 +104,7 @@ class OutputDataExecutor:
       return files
 
     inputFC = FileCatalog( [inputFCName] )
-    result  = inputFC.listDirectory( inputPath, True )
+    result = inputFC.listDirectory( inputPath, True )
 
     if not result['OK']:
       self.log.error( result['Message'] )
@@ -114,7 +114,7 @@ class OutputDataExecutor:
       return []
 
     subDirs = result['Value']['Successful'][inputPath]['SubDirs']
-    files   = result['Value']['Successful'][inputPath]['Files']
+    files = result['Value']['Successful'][inputPath]['Files']
     for subDir in subDirs:
       self.log.info( 'Ignoring subdirectory:', subDir )
     return files.keys()

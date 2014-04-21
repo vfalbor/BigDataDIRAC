@@ -4,23 +4,6 @@
 # Author : Victor Fernandez
 ########################################################################
 """ BigDataDB class is a front-end to the big data softwares DB
-
-  Life cycle of VMs Images in DB
-  - New:       Inserted by Director (Name - Requirements - Status = New ) if not existing when launching a new Job
-  - Validated: Declared by VMMonitoring Server when an Job reports back correctly
-  - Error:     Declared by VMMonitoring Server when an Job reports back wrong requirements
-
-  Life cycle of VMs Instances in DB
-  - New:       Inserted by Director before launching a new Job, to check if image is valid
-  - Submitted: Inserted by Director (adding UniqueID) when launches a new Job
-  - Wait_ssh_context:     Declared by Director for submitted Job wich need later contextualization using ssh (VirtualMachineContextualization will check)
-  - Contextualizing:     on the waith_ssh_context path is the next status before Running
-  - Running:   Declared by VMMonitoring Server when an Job reports back correctly (add LastUpdate, publicIP and privateIP)
-  - Stopping:  Declared by VMManager Server when an Job has been deleted outside of the VM (f.e "Delete" button on Browse Instances)
-  - Halted:    Declared by VMMonitoring Server when an Job reports halting
-  - Stalled:   Declared by VMManager Server when detects Job no more running
-  - Error:     Declared by VMMonitoring Server when an Job reports back wrong requirements or reports as running when Halted
-
 """
 
 import types
@@ -29,52 +12,61 @@ import types
 from DIRAC                import gConfig, S_ERROR, S_OK
 from DIRAC.Core.Base.DB   import DB
 from DIRAC.Core.Utilities import DEncode, Time
+from DIRAC.WorkloadManagementSystem.Client.ServerUtils import jobDB
 
 class BigDataDB( DB ):
 
-  validJobStates = [ 'Submitted', 'Mapping', 'Reduccing',
-                          'Queue', 'Done', 'Stalled', 'Error' ]
+  validJobStates = [ 'Submitted', 'Running', 'Done', 'Stalled', 'Error' ]
 
-  validSoftware = ['hdv1,hdv2,twister']
+  validSoftware = ['hadoop', 'twister']
+  validSoftwareVersion = ['hdv1', 'hdv2', 'tw1']
+
+  validHighLevelLang = ['pig', 'hive', 'none']
+  validHighLevelLangVersion = ['1']
 
   # In seconds !
   stallingInterval = 30 * 60
 
   tablesDesc = {}
 
-  tablesDesc[ 'bd_Jobs' ] = { 'Fields' : { 'BdJobID' : 'BIGINT UNSIGNED AUTO_INCREMENT NOT NULL',
-                                          'Name' : 'VARCHAR(32) NOT NULL',
-                                          'NameNode' : 'VARCHAR(32) NOT NULL',
+  tablesDesc[ 'BD_Jobs' ] = { 'Fields' : { 'BdJobID' : 'BIGINT UNSIGNED AUTO_INCREMENT NOT NULL',
+                                          'BdJobName' : 'VARCHAR(255) NOT NULL',
+                                          'BdJobStatus' : 'VARCHAR(32) NOT NULL',
+                                          'BdJobLastUpdate' : 'DATETIME',
+                                          'NameNode' : 'VARCHAR(255) NOT NULL',
                                           'SiteName' : 'VARCHAR(32) NOT NULL',
-                                          'Status' : 'VARCHAR(32) NOT NULL',
-                                          'LastUpdate' : 'DATETIME',
                                           'PublicIP' : 'VARCHAR(32) NOT NULL DEFAULT ""',
                                           'ErrorMessage' : 'VARCHAR(255) NOT NULL DEFAULT ""',
-                                          'BdSoftware' : 'INT NOT NULL',
                                           'BdInputData' : 'VARCHAR(255) NOT NULL DEFAULT ""',
-                                          'BdOutputData' : 'VARCHAR(255) NOT NULL DEFAULT ""'
-                                             },
+                                          'BdOutputData' : 'VARCHAR(255) NOT NULL DEFAULT ""',
+                                          'BdSoftName' : 'VARCHAR(255) NOT NULL',
+                                          'BdSoftVersion' : 'VARCHAR(32) NOT NULL',
+                                          'BdSoftHighLevelLang' : 'VARCHAR(255) NOT NULL DEFAULT ""',
+                                          'BdSoftHighLevelLangVersion' : 'VARCHAR(32) NOT NULL DEFAULT ""',
+                                          'BdJobSoftwareID' : 'VARCHAR(255) NOT NULL DEFAULT ""'
+                                          },
                                    'PrimaryKey' : 'BdJobID',
-                                   'Indexes': { 'Status': [ 'Status' ] },
+                                   'Indexes': { 'BdJobStatus': [ 'BdJobStatus' ] },
                                  }
 
-  tablesDesc[ 'bd_Software' ] = { 'Fields' : { 'BdSoftID' : 'BIGINT UNSIGNED AUTO_INCREMENT NOT NULL',
-                                          'Name' : 'VARCHAR(32) NOT NULL',
-                                          'Version' : 'VARCHAR(32) NOT NULL',
-                                          'HLevelLang' : 'INT NOT NULL'
+  tablesDesc[ 'BD_History' ] = { 'Fields' : { 'His_ID' : 'BIGINT UNSIGNED AUTO_INCREMENT NOT NULL',
+                                          'His_BdJobID' : 'VARCHAR(32) NOT NULL',
+                                          'His_JobName' : 'VARCHAR(255) NOT NULL',
+                                          'His_JobStatus' : 'VARCHAR(32) NOT NULL',
+                                          'His_Update' : 'DATETIME',
+                                          'His_NameNode' : 'VARCHAR(255) NOT NULL',
+                                          'His_SiteName' : 'VARCHAR(32) NOT NULL',
+                                          'His_BdSoftName' : 'VARCHAR(255) NOT NULL',
+                                          'His_BdSoftVersion' : 'VARCHAR(32) NOT NULL',
+                                          'His_BdSoftHighLevelLang' : 'VARCHAR(255) NOT NULL DEFAULT ""',
+                                          'His_BdSoftHighLevelLangVersion' : 'VARCHAR(32) NOT NULL DEFAULT ""',
+                                          'His_BdJobSoftwareID' : 'VARCHAR(255) NOT NULL DEFAULT ""'
                                              },
-                                   'PrimaryKey' : 'BdSoftID'
+                                   'PrimaryKey' : 'His_ID',
+                                   'Indexes': { 'His_JobStatus': [ 'His_JobStatus' ] },
                                  }
 
-  tablesDesc[ 'bd_HLevelLang' ] = { 'Fields' : { 'BdHLevelID' : 'BIGINT UNSIGNED AUTO_INCREMENT NOT NULL',
-                                          'Name' : 'VARCHAR(32) NOT NULL',
-                                          'Version' : 'VARCHAR(32) NOT NULL'
-                                             },
-                                   'PrimaryKey' : 'BdHLevelID'
-                                 }
-
-
-  tablesDesc[ 'temp_DataSetCatalog' ] = { 'Fields' : { 'BdLFNID' : 'BIGINT UNSIGNED AUTO_INCREMENT NOT NULL',
+  tablesDesc[ 'temp_BD_DataSetCatalog' ] = { 'Fields' : { 'BdLFNID' : 'BIGINT UNSIGNED AUTO_INCREMENT NOT NULL',
                                           'LFN' : 'VARCHAR(32) NOT NULL',
                                           'SiteName' : 'VARCHAR(32) NOT NULL',
                                              },
@@ -99,34 +91,36 @@ class BigDataDB( DB ):
     tableName, validStates, idName = '', [], ''
 
     if element == 'job':
-      tableName = 'bd_Jobs'
+      tableName = 'BD_Jobs'
       validStates = self.validJobStates
       idName = 'BdJobID'
-    elif element == 'software':
-      tableName = 'bd_Software'
-      validStates = self.validSoftware
-      idName = 'BdSoftID'
+
+    if element == 'dataset':
+      tableName = 'temp_BD_DataSetCatalog'
+      idName = 'BdLFNID'
 
     return ( tableName, validStates, idName )
+
 
   def getBigDataJobsByStatus( self, status ):
     """
     Get dictionary of Job Names with BdJobID in given status 
     """
-    if status not in self.validInstanceStates:
+    if status not in self.validJobStates:
       return S_ERROR( 'Status %s is not known' % status )
 
     # InstanceTuple
     tableName, _validStates, _idName = self.__getTypeTuple( 'job' )
 
-    runningJobs = self._getFields( tableName, [ 'BdJobID', 'UniqueID' ], ['Status'], [status] )
+    runningJobs = self._getFields( tableName, [ 'BdJobID' ],
+                                        [ 'BdJobStatus' ],
+                                        [ status ] )
     if not runningJobs[ 'OK' ]:
       return runningJobs
-    runningJobs = runningJobs[ 'Value' ]
 
     jobsDict = {}
 
-    jobsDict = runningJobs[ 'Value' ][ 0 ][ 0 ]
+    jobsDict = runningJobs[ 'Value' ]
 
     return S_OK( jobsDict )
 
@@ -134,21 +128,21 @@ class BigDataDB( DB ):
     """
     Get dictionary of Job Names with BdJobID in given status 
     """
-    if status not in self.validInstanceStates:
+    if status not in self.validJobStates:
       return S_ERROR( 'Status %s is not known' % status )
 
     # InstanceTuple
     tableName, _validStates, _idName = self.__getTypeTuple( 'job' )
 
-    runningJobs = self._getFields( tableName, [ 'VMImageID', 'UniqueID' ],
-                                        [ 'Status', 'Endpoint' ], [ status, endpoint ] )
+    runningJobs = self._getFields( tableName, [ 'BdJobID' ],
+                                        [ 'BdJobStatus', 'NameNode' ],
+                                        [ status, endpoint ] )
     if not runningJobs[ 'OK' ]:
       return runningJobs
-    runningJobs = runningJobs[ 'Value' ]
 
     jobsDict = {}
 
-    jobsDict = runningJobs[ 'Value' ][ 0 ][ 0 ]
+    jobsDict = runningJobs[ 'Value' ]
 
     return S_OK( jobsDict )
 
@@ -208,3 +202,211 @@ class BigDataDB( DB ):
 
      return self._query( sqlSelect )
 
+  def getDataSetBySitename( self, sitename ):
+    # InstanceTuple
+    tableName, _validStates, _idName = self.__getTypeTuple( 'dataset' )
+
+    dataset = self._getFields( tableName, [ 'BdLFNID', 'LFN' ],
+                                        [ 'SiteName' ], [ sitename ] )
+    if not dataset[ 'OK' ]:
+      return dataset
+    datasetDict = {}
+    datasetDict = dataset[ 'Value' ]
+    return datasetDict
+
+  def getSiteNameByDataSet( self, dataset ):
+    # InstanceTuple
+    tableName, _validStates, _idName = self.__getTypeTuple( 'dataset' )
+
+    SiteName = self._getFields( tableName, [ 'BdLFNID', 'SiteName' ],
+                                        [ 'LFN' ], [ dataset ] )
+    if not SiteName[ 'OK' ]:
+      return SiteName
+    SiteNameDict = {}
+    SiteNameDict = SiteName[ 'Value' ]
+    return SiteNameDict
+
+  def getSoftwareJobIDByJobID( self, jobID ):
+    # InstanceTuple
+    tableName, _validStates, _idName = self.__getTypeTuple( 'job' )
+
+    BdJobSoftwareID = self._getFields( tableName, [ 'BdJobSoftwareID', 'NameNode' ],
+                                        [ 'BdJobID' ], [ jobID ] )
+    if not BdJobSoftwareID[ 'OK' ]:
+      return BdJobSoftwareID
+    BdJobSoftwareIDDict = {}
+    BdJobSoftwareIDDict = BdJobSoftwareID[ 'Value' ]
+    return BdJobSoftwareIDDict
+
+
+  def getJobIDInfo( self, jobID ):
+    # InstanceTuple
+    tableName, _validStates, _idName = self.__getTypeTuple( 'job' )
+
+    BdJobSoftwareID = self._getFields( tableName, [ 'BdJobName', 'NameNode', 'SiteName',
+                                                   'BdSoftName', 'BdSoftVersion', 'BdSoftHighLevelLang',
+                                                    'BdSoftHighLevelLangVersion', 'BdJobSoftwareID'],
+                                        [ 'BdJobID' ], [ jobID ] )
+    if not BdJobSoftwareID[ 'OK' ]:
+      return BdJobSoftwareID
+    BdJobSoftwareIDDict = {}
+    BdJobSoftwareIDDict = BdJobSoftwareID[ 'Value' ]
+    return BdJobSoftwareIDDict
+
+  def getRunningEnPointDict( self, runningEndPointName ):
+    """
+    Return from CS a Dictionary with getRunningEnPointDict definition
+    """
+
+    runningEndPointCSPath = '/Resources/BigDataEndPoints'
+
+    definedRunningEndPoints = gConfig.getSections( runningEndPointCSPath )
+    if not definedRunningEndPoints[ 'OK' ]:
+      return S_ERROR( 'BigData section not defined' )
+
+    runningBDCSPath = '%s/%s' % ( runningEndPointCSPath, runningEndPointName )
+
+    runningEndPointBDDict = {}
+
+    if not runningBDCSPath:
+      return S_ERROR( 'Missing BigDataEndpoint "%s"' % runningEndPointName )
+
+    for option, value in gConfig.getOptionsDict( runningBDCSPath )['Value'].items():
+      runningEndPointBDDict[option] = value
+
+    runningHighLevelLanguajeDict = gConfig.getOptionsDict( '%s/HighLevelLanguage' % runningBDCSPath )
+    if not runningHighLevelLanguajeDict[ 'OK' ]:
+      return S_ERROR( 'Missing HighLevelLang in "%s"' % runningBDCSPath )
+    runningEndPointBDDict['HighLevelLanguage'] = runningHighLevelLanguajeDict['Value']
+
+    runningReqDict = gConfig.getOptionsDict( '%s/Requirements' % runningBDCSPath )
+    if not runningReqDict[ 'OK' ]:
+      return S_ERROR( 'Missing Requirements in "%s"' % runningBDCSPath )
+    runningEndPointBDDict['Requirements'] = runningReqDict['Value']
+
+    return S_OK( runningEndPointBDDict )
+
+  def setHadoopID( self, JobID, HadoopID ):
+    """
+    Insert HadoopID
+    """
+    tableName, _validStates, idName = self.__getTypeTuple( 'job' )
+    sqlUpdate = 'UPDATE %s SET BdJobSoftwareID= "%s" WHERE %s = %s' % ( tableName, HadoopID, idName, JobID )
+    return self._update( sqlUpdate )
+
+  def setJobStatus( self, JobID, status ):
+    """
+    Insert HadoopID
+    """
+    resultInfo = self.getJobIDInfo( JobID )
+
+    tableName, _validStates, idName = self.__getTypeTuple( 'job' )
+    sqlUpdate = 'UPDATE %s SET BdJobStatus= "%s" WHERE %s = %s' % ( tableName, status, idName, JobID )
+    self._update( sqlUpdate )
+    sqlUpdate = 'UPDATE %s SET BdJobLastUpdate= "%s" WHERE %s = %s' % ( tableName, Time.toString(), idName, JobID )
+    self._update( sqlUpdate )
+
+    job_his = self.insertHistoryJob( str( JobID ), resultInfo[0][0], status, resultInfo[0][1], Time.toString(),
+                          resultInfo[0][2], resultInfo[0][3], resultInfo[0][4], resultInfo[0][5],
+                          resultInfo[0][6] )
+    if not job_his['OK']:
+      return S_ERROR( 'Failed to insert Big Data Job in history table' )
+    result = self.setIntoJobDBStatus( JobID, status, resultInfo[0][1], resultInfo[0][2], resultInfo[0][7].strip() )
+
+    return S_OK( result )
+
+  def setIntoJobDBStatus( self, jobID, status, JobGroup, Site, jobBDSoftwareName ):
+
+    returned = jobDB.setJobStatus( jobID, status )
+
+    if status == "Running":
+      jobDB.setJobAttribute( jobID, "MinorStatus", "MapReducing Step" )
+      jobDB.setJobAttribute( jobID, "JobType", "User" )
+      jobDB.setJobAttribute( jobID, "ApplicationStatus", "Running with JobID: " + jobBDSoftwareName )
+      jobDB.setJobAttribute( jobID, "JobGroup", JobGroup )
+      jobDB.setJobAttribute( jobID, "Site", Site )
+    if status == "Submitted":
+      if ( jobBDSoftwareName != "" ):
+        jobDB.setJobAttribute( jobID, "MinorStatus", "Job in Queue with JobId:" + jobBDSoftwareName )
+        jobDB.setJobAttribute( jobID, "ApplicationStatus", "Job in queue" )
+      else:
+        jobDB.setJobAttribute( jobID, "MinorStatus", "Unknown Status" )
+        jobDB.setJobAttribute( jobID, "ApplicationStatus", "Unknown Status in BDSoftware" )
+      jobDB.setJobAttribute( jobID, "JobType", "User" )
+      jobDB.setJobAttribute( jobID, "JobGroup", JobGroup )
+      jobDB.setJobAttribute( jobID, "Site", Site )
+    if status == "Done":
+      jobDB.setJobAttribute( jobID, "ApplicationStatus", "MapReducing Process Finished" )
+      jobDB.setJobAttribute( jobID, "MinorStatus", "Execution Complete" )
+
+    if not returned['OK']:
+      return S_ERROR( 'Failed to insert Status Job into JobDB' )
+
+    return S_OK( 'OK' )
+
+  def insertBigDataJob( self, JobID, JobName, LastUpdate, NameNode,
+                        SiteName, PublicIP, ErrorMes, InputData,
+                        OutputData, SoftName, SoftVersion, HighLevelLang,
+                        HighLevelLangVersion, status ):
+    """
+    Insert tupple Job in JobBigData Table
+    """
+    self.log.info( 'BigDataDB:insertBigDataJob' )
+    #Testing matching fields
+    if SoftName not in self.validSoftware:
+      self.log.error( 'Defined BigData Software %s not matching with:' % self.validSoftware, SoftName )
+      return S_ERROR( "ERROR" )
+
+    if SoftVersion not in self.validSoftwareVersion:
+      self.log.error( 'Defined BigData Software ver. %s not matching with:' % self.validSoftwareVersion, SoftVersion )
+      return S_ERROR( "ERROR" )
+
+    if HighLevelLang not in self.validHighLevelLang:
+      self.log.error( 'Defined BigData HLLang %s not matching with:' % self.validHighLevelLang, HighLevelLang )
+      return S_ERROR( "ERROR" )
+
+    tableName, validStates, _idName = self.__getTypeTuple( 'job' )
+
+    fields = [ 'BdJobID', 'BdJobName', 'BdJobStatus', 'BdJobLastUpdate', 'NameNode',
+              'SiteName', 'PublicIP', 'ErrorMessage', 'BdInputData',
+              'BdOutputData', 'BdSoftName', 'BdSoftVersion', 'BdSoftHighLevelLang',
+              'BdSoftHighLevelLangVersion']
+
+    values = [JobID, JobName, status, LastUpdate, NameNode,
+              SiteName, PublicIP, ErrorMes, InputData,
+              OutputData, SoftName, SoftVersion, HighLevelLang,
+              HighLevelLangVersion ]
+
+    self.log.info( 'BigDataDB:insertBigDataJob:JobInsertion' )
+    job = self._insert( tableName , fields, values )
+    if not job['OK']:
+      return S_ERROR( 'Failed to insert new Big Data Job' )
+
+    self.log.info( 'BigDataDB:insertBigDataJob:JobHistoryInsertion' )
+    job_his = self.insertHistoryJob( JobID, JobName, status, NameNode, LastUpdate,
+                          SiteName, SoftName, SoftVersion, HighLevelLang,
+                          HighLevelLangVersion )
+    if not job_his['OK']:
+      return S_ERROR( 'Failed to insert Big Data Job in history table' )
+
+    return S_OK( job )
+
+  def insertHistoryJob( self, JobID, JobName, status, NameNode, Update,
+                          SiteName, SoftName, SoftVersion, HighLevelLang,
+                          HighLevelLangVersion ):
+      """
+      Insert historic data
+      """
+      fields = [ 'His_BdJobID', 'His_JobName', 'His_JobStatus', 'His_Update', 'His_NameNode',
+              'His_SiteName', 'His_BdSoftName', 'His_BdSoftVersion', 'His_BdSoftHighLevelLang',
+              'His_BdSoftHighLevelLangVersion']
+
+      values = [JobID, JobName, status, Update, NameNode,
+                SiteName, SoftName, SoftVersion, HighLevelLang,
+                HighLevelLangVersion ]
+
+      job = self._insert( 'BD_History' , fields, values )
+      if not job['OK']:
+        return S_ERROR( 'Failed to insert new Big Data Job' )
+
+      return S_OK( job )
