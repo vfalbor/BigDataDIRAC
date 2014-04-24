@@ -20,12 +20,23 @@ class HadoopV1Client:
     self.publicIP = PublicIP
     self.sshConnect = ConnectionUtils( self.user , self.publicIP )
 
+  def getData( self, temSRC, tempDest ):
+    cmdSeq = "hadoop dfs -get " + temSRC + " " + tempDest
+    return self.sshConnect.sshCall( 100, cmdSeq )
+
   def jobSubmit( self, tempPath, jobXMLName ):
     cmdSeq = "hadoop job -submit " + tempPath + "/" + jobXMLName
     return self.sshConnect.sshCall( 100, cmdSeq )
 
+  def delData( self, tempPath ):
+    cmdSeq = "rm -Rf " + tempPath
+    return self.sshConnect.sshCall( 100, cmdSeq )
+
   def dataCopy( self, tempPath, tmpSandBoxDir ):
     return self.sshConnect.scpCall( 100, tempPath, tmpSandBoxDir )
+
+  def getdata( self, tempPath, tmpSandBoxDir ):
+    return self.sshConnect.scpCall( 100, tempPath, tmpSandBoxDir, False )
 
   def jobStatus( self, jobId, user, host ):
     cmdSeq = "ssh -l " + user + " " + host + " 'hadoop job -list all | awk -v job_id=" + jobId.strip() + " "\

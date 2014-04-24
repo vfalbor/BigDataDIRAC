@@ -8,7 +8,8 @@
 
 """
 
-import random, time, re
+import random, time, re, os, glob, shutil
+from DIRAC import S_OK
 import DIRAC
 
 from numpy.random import poisson
@@ -22,6 +23,9 @@ from DIRAC.Core.Utilities.ThreadPool                   import ThreadPool
 from BigDataDIRAC.Resources.BigData.BigDataDirector           import BigDataDirector
 from BigDataDIRAC.WorkloadManagementSystem.Client.ServerUtils import BigDataDB
 from DIRAC.WorkloadManagementSystem.Client.ServerUtils import jobDB
+
+from DIRAC.WorkloadManagementSystem.Client.SandboxStoreClient   import SandboxStoreClient
+from DIRAC.Core.Utilities.File                              import getGlobbedTotalSize, getGlobbedFiles
 
 from DIRAC.Interfaces.API.Dirac import Dirac
 
@@ -51,6 +55,16 @@ class BigDataJobMonitoring( AgentModule ):
     self.pendingJobs = {}
     self.monitoringEndPoints = {}
 
+    """
+    #SandBox Settings
+    """
+    self.__tmpSandBoxDir = "/tmp/"
+    self.sandboxClient = SandboxStoreClient()
+    self.failedFlag = True
+    self.sandboxSizeLimit = 1024 * 1024 * 10
+
+    self.cleanDataAfterFinish = True
+
     return DIRAC.S_OK()
 
   def execute( self ):
@@ -59,6 +73,7 @@ class BigDataJobMonitoring( AgentModule ):
       2.- Ask about the status
       3.- Change the status into DB in the case of had changed
     """
+
     self.pendingJobs['Submitted'] = BigDataDB.getBigDataJobsByStatus( "Submitted" )
     self.pendingJobs['Running'] = BigDataDB.getBigDataJobsByStatus( "Running" )
     self.pendingJobs['Unknown'] = BigDataDB.getBigDataJobsByStatus( "Unknown" )
@@ -91,6 +106,14 @@ class BigDataJobMonitoring( AgentModule ):
                     if JobStatus['OK'] == True:
                       if ( JobStatus['Value'][1].strip() == "Succeded" ):
                         BigDataDB.setJobStatus( jobId[0], "Done" )
+                        self.__updateSandBox( jobId[0],
+                                             self.monitoringEndPoints[runningEndPoint]['BigDataSoftware'],
+                                             self.monitoringEndPoints[runningEndPoint]['BigDataSoftwareVersion'] ,
+                                             self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLName'],
+                                             self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLVersion'],
+                                             HadoopV1cli )
+                        if cleanDataAfterFinish:
+                          self.__deleteData( jobId[0], HadoopV1cli )
                       if ( JobStatus['Value'][1].strip() == "Unknown" ):
                         BigDataDB.setJobStatus( jobId[0], "Submitted" )
                       if ( JobStatus['Value'][1].strip() == "Running" ):
@@ -109,6 +132,14 @@ class BigDataJobMonitoring( AgentModule ):
                     if JobStatus['OK'] == True:
                       if ( JobStatus['Value'] == "Succeded" ):
                         BigDataDB.setJobStatus( jobId[0], "Done" )
+                        self.__updateSandBox( jobId[0],
+                                             self.monitoringEndPoints[runningEndPoint]['BigDataSoftware'],
+                                             self.monitoringEndPoints[runningEndPoint]['BigDataSoftwareVersion'] ,
+                                             self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLName'],
+                                             self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLVersion'],
+                                             HadoopV2cli )
+                        if cleanDataAfterFinish:
+                          self.__deleteData( jobId[0], HadoopV2cli )
                       if ( JobStatus['Value'] == "Unknown" ):
                         BigDataDB.setJobStatus( jobId[0], "Submitted" )
                       if ( JobStatus['Value'] == "Running" ):
@@ -116,6 +147,153 @@ class BigDataJobMonitoring( AgentModule ):
 
 
     return DIRAC.S_OK()
+
+  def __deleteData( self, jobid, cli ):
+    source = self.__tmpSandBoxDir + str( jobid )
+    shutil.rmtree( source )
+    result = cli.delData( source )
+    if not result['OK']:
+      self.log.error( 'Error the data on BigData cluster could not be deleted', result )
+      continue
+    return 'Data deleted'
+
+  def __updateSandBox( self, jobid, software, version, hll, hllversion, cli ):
+    jobInfo = BigDataDB.getJobIDInfo( jobid )
+
+    source = self.__tmpSandBoxDir + str( jobid ) + "/InputSandbox" + str( jobid ) + "/" + \
+      self.__getJobName( jobInfo[0][0] ) + "_" + str( jobid )
+    dest = self.__tmpSandBoxDir + str( jobid ) + "/" + \
+      self.__getJobName( jobInfo[0][0] ) + "_" + str( jobid )
+    result = 0
+    if ( ( software == "hadoop" ) and ( version == "hdv1" ) and ( hll == "none" ) ):
+      result = cli.getData( source , dest )
+    if ( ( software == "hadoop" ) and ( version == "hdv2" ) and ( hll == "none" ) ):
+      result = cli.getData( source , dest )
+    if not result['OK']:
+      self.log.error( 'Error to get the data from BigData Software DFS:', result )
+
+    result = cli.getdata( dest, dest )
+    if not result['OK']:
+      self.log.error( 'Error to get the data from BigData Cluster to DIRAC:', result )
+
+    outputSandbox = self.get_filepaths( dest )
+
+    resolvedSandbox = self.__resolveOutputSandboxFiles( outputSandbox )
+    if not resolvedSandbox['OK']:
+      self.log.warn( 'Output sandbox file resolution failed:' )
+      self.log.warn( resolvedSandbox['Message'] )
+      self.__report( 'Failed', 'Resolving Output Sandbox' )
+    fileList = resolvedSandbox['Value']['Files']
+    missingFiles = resolvedSandbox['Value']['Missing']
+    if missingFiles:
+      self.jobReport.setJobParameter( 'OutputSandboxMissingFiles', ', '.join( missingFiles ), sendFlag = False )
+
+    if fileList and jobid:
+      self.outputSandboxSize = getGlobbedTotalSize( fileList )
+      self.log.info( 'Attempting to upload Sandbox with limit:', self.sandboxSizeLimit )
+
+      result = self.sandboxClient.uploadFilesAsSandboxForJob( fileList, jobid,
+                                                         'Output', self.sandboxSizeLimit ) # 1024*1024*10
+      if not result['OK']:
+        self.log.error( 'Output sandbox upload failed with message', result['Message'] )
+        if result.has_key( 'SandboxFileName' ):
+          outputSandboxData = result['SandboxFileName']
+          self.log.info( 'Attempting to upload %s as output data' % ( outputSandboxData ) )
+          outputData.append( outputSandboxData )
+          self.jobReport.setJobParameter( 'OutputSandbox', 'Sandbox uploaded to grid storage', sendFlag = False )
+          self.jobReport.setJobParameter( 'OutputSandboxLFN',
+                                          self.__getLFNfromOutputFile( outputSandboxData )[0], sendFlag = False )
+        else:
+          self.log.info( 'Could not get SandboxFileName to attempt upload to Grid storage' )
+          return S_ERROR( 'Output sandbox upload failed and no file name supplied for failover to Grid storage' )
+      else:
+        # Do not overwrite in case of Error
+        if not self.failedFlag:
+          self.__report( 'Completed', 'Output Sandbox Uploaded' )
+        self.log.info( 'Sandbox uploaded successfully' )
+
+    return "OK"
+
+  def __getLFNfromOutputFile( self, outputFile, outputPath = '' ):
+    """Provides a generic convention for VO output data
+       files if no path is specified.
+    """
+
+    if not re.search( '^LFN:', outputFile ):
+      localfile = outputFile
+      initial = self.owner[:1]
+      vo = getVOForGroup( self.userGroup )
+      if not vo:
+        vo = 'dirac'
+      basePath = '/' + vo + '/user/' + initial + '/' + self.owner
+      if outputPath:
+        # If output path is given, append it to the user path and put output files in this directory
+        if outputPath.startswith( '/' ):
+          outputPath = outputPath[1:]
+      else:
+        # By default the output path is constructed from the job id 
+        subdir = str( self.jobID / 1000 )
+        outputPath = subdir + '/' + str( self.jobID )
+      lfn = os.path.join( basePath, outputPath, os.path.basename( localfile ) )
+    else:
+      # if LFN is given, take it as it is
+      localfile = os.path.basename( outputFile.replace( "LFN:", "" ) )
+      lfn = outputFile.replace( "LFN:", "" )
+
+    return ( lfn, localfile )
+
+  def get_filepaths( self, directory ):
+    """
+    This function will generate the file names in a directory
+    """
+    file_paths = []
+    for root, directories, files in os.walk( directory ):
+        for filename in files:
+            filepath = os.path.join( root, filename )
+            file_paths.append( filepath )
+    return file_paths
+
+  def __resolveOutputSandboxFiles( self, outputSandbox ):
+    """Checks the output sandbox file list and resolves any specified wildcards.
+       Also tars any specified directories.
+    """
+    missing = []
+    okFiles = []
+    for i in outputSandbox:
+      self.log.verbose( 'Looking at OutputSandbox file/directory/wildcard: %s' % i )
+      globList = glob.glob( i )
+      for check in globList:
+        if os.path.isfile( check ):
+          self.log.verbose( 'Found locally existing OutputSandbox file: %s' % check )
+          okFiles.append( check )
+        if os.path.isdir( check ):
+          self.log.verbose( 'Found locally existing OutputSandbox directory: %s' % check )
+          cmd = ['tar', 'cf', '%s.tar' % check, check]
+          result = systemCall( 60, cmd )
+          if not result['OK']:
+            self.log.error( 'Failed to create OutputSandbox tar', result['Message'] )
+          elif result['Value'][0]:
+            self.log.error( 'Failed to create OutputSandbox tar', result['Value'][2] )
+          if os.path.isfile( '%s.tar' % ( check ) ):
+            self.log.verbose( 'Appending %s.tar to OutputSandbox' % check )
+            okFiles.append( '%s.tar' % ( check ) )
+          else:
+            self.log.warn( 'Could not tar OutputSandbox directory: %s' % check )
+            missing.append( check )
+
+    for i in outputSandbox:
+      if not i in okFiles:
+        if not '%s.tar' % i in okFiles:
+          if not re.search( '\*', i ):
+            if not i in missing:
+              missing.append( i )
+
+    result = {'Missing':missing, 'Files':okFiles}
+    return S_OK( result )
+
+  def __getJobName( self, jobName ):
+    result = re.split( "_", jobName )
+    return result[0]
 
   def __getMonitoringPools( self ):
 

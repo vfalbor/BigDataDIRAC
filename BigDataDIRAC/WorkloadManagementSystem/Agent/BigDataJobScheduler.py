@@ -54,6 +54,8 @@ class BigDataJobScheduler( AgentModule ):
     """
     import threading
 
+    self.__tmpSandBoxDir = "/tmp/"
+
     self.am_setOption( "PollingTime", 60.0 )
 
     self.am_setOption( "ThreadStartDelay", 1 )
@@ -80,7 +82,6 @@ class BigDataJobScheduler( AgentModule ):
       2.- Count Pending Jobs
       3.- Submit Jobs
     """
-
 
     self.__checkSubmitPools()
 

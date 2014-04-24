@@ -43,9 +43,7 @@ class OutputDataAgent( AgentModule ):
     """
     Loop over InputPath and OutputPath pairs
     """
-    self.log.info( '::::::1' )
     self.__outDataExecutor.checkForTransfers()
-    self.log.info( '::::::2' )
     maxCycles = self.am_getMaxCycles()
     if maxCycles > 0 and maxCycles - self.am_getCyclesDone() == 1:
       self.log.info( "Waiting to all transfers to finish before ending the last cycle" )
