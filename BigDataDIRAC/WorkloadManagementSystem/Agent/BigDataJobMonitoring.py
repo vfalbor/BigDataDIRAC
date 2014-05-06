@@ -8,27 +8,26 @@
 
 """
 
-import random, time, re, os, glob, shutil
-from DIRAC import S_OK
-import DIRAC
-
+import random, time, re, os, glob, shutil, sys, base64, bz2, tempfile, stat, string
 from numpy.random import poisson
 from random       import shuffle
 
 # DIRAC
-from DIRAC                                             import gConfig
-from DIRAC.Core.Base.AgentModule                       import AgentModule
-from DIRAC.Core.Utilities.ThreadPool                   import ThreadPool
+import DIRAC
+from DIRAC                                                    import S_OK, S_ERROR
+from DIRAC                                                    import gConfig
+from DIRAC.Core.Base.AgentModule                              import AgentModule
+from DIRAC.Core.Utilities.ThreadPool                          import ThreadPool
+from DIRAC.WorkloadManagementSystem.Client.ServerUtils        import jobDB
+from DIRAC.WorkloadManagementSystem.Client.SandboxStoreClient import SandboxStoreClient
+from DIRAC.Core.Utilities.File                                import getGlobbedTotalSize, getGlobbedFiles
+from DIRAC.Interfaces.API.Dirac import Dirac
 
 from BigDataDIRAC.Resources.BigData.BigDataDirector           import BigDataDirector
 from BigDataDIRAC.WorkloadManagementSystem.Client.ServerUtils import BigDataDB
-from DIRAC.WorkloadManagementSystem.Client.ServerUtils import jobDB
+from BigDataDIRAC.WorkloadManagementSystem.private.ConnectionUtils import ConnectionUtils
 
-from DIRAC.WorkloadManagementSystem.Client.SandboxStoreClient   import SandboxStoreClient
-from DIRAC.Core.Utilities.File                              import getGlobbedTotalSize, getGlobbedFiles
-
-from DIRAC.Interfaces.API.Dirac import Dirac
-
+from DIRAC.FrameworkSystem.Client.ProxyManagerClient        import gProxyManager
 __RCSID__ = "$Id: $"
 
 #FIXME: why do we need the random seed ?
@@ -112,7 +111,7 @@ class BigDataJobMonitoring( AgentModule ):
                                              self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLName'],
                                              self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLVersion'],
                                              HadoopV1cli )
-                        if cleanDataAfterFinish:
+                        if self.cleanDataAfterFinish:
                           self.__deleteData( jobId[0], HadoopV1cli )
                       if ( JobStatus['Value'][1].strip() == "Unknown" ):
                         BigDataDB.setJobStatus( jobId[0], "Submitted" )
@@ -154,7 +153,7 @@ class BigDataJobMonitoring( AgentModule ):
     result = cli.delData( source )
     if not result['OK']:
       self.log.error( 'Error the data on BigData cluster could not be deleted', result )
-      continue
+      return S_ERROR( 'Data can not be deleted' )
     return 'Data deleted'
 
   def __updateSandBox( self, jobid, software, version, hll, hllversion, cli ):
@@ -307,8 +306,6 @@ class BigDataJobMonitoring( AgentModule ):
 
     return "OK"
 
-
-
   def configureFromSection( self, mySection, endPoint ):
     """
       get CS for monitoring endpoints
@@ -340,4 +337,5 @@ class BigDataJobMonitoring( AgentModule ):
     self.monitoringEndPoints[endPoint]['PublicIP'] = monitoringBDEndPointDict['PublicIP']
 
     self.monitoringEndPoints[endPoint]['HighLevelLanguage'] = monitoringBDEndPointDict['HighLevelLanguage']
+
 

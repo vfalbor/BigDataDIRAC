@@ -104,7 +104,7 @@ class SoftBigDataDirector:
 
   def submitBigDataJobs( self, endpoint, numBigDataJobsAllowed, runningSiteName, NameNode,
                          BigDataSoftware, BigDataSoftwareVersion, HLLName, HLLVersion,
-                         PublicIP, Port, jobIds , runningEndPointName, JobName, User ):
+                         PublicIP, Port, jobIds , runningEndPointName, JobName, User, Arguments ):
     """
     Big Data job submission with all the parameters of SITE and Job
     """
@@ -123,7 +123,7 @@ class SoftBigDataDirector:
 
     self.log.info( 'Director:submitBigDataJobs:SubmitJob' )
     dictBDJobSubmitted = self._submitBigDataJobs( NameNode, Port, jobIds, PublicIP,
-                                                  runningEndPointName, User, JobName )
+                                                  runningEndPointName, User, JobName, Arguments )
 
     if not dictBDJobSubmitted[ 'OK' ]:
       return dictBDJobSubmitted

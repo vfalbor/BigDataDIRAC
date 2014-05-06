@@ -39,7 +39,7 @@ from DIRAC.WorkloadManagementSystem.Client.ServerUtils import jobDB
 
 from BigDataDIRAC.Resources.BigData.BigDataDirector           import BigDataDirector
 from BigDataDIRAC.WorkloadManagementSystem.Client.ServerUtils import BigDataDB
-
+from DIRAC.Core.Utilities.ClassAd.ClassAdLight      import ClassAd
 from DIRAC.Interfaces.API.Dirac import Dirac
 
 __RCSID__ = "$Id: $"
@@ -82,7 +82,6 @@ class BigDataJobScheduler( AgentModule ):
       2.- Count Pending Jobs
       3.- Submit Jobs
     """
-
     self.__checkSubmitPools()
 
     bigDataJobsToSubmit = {}
@@ -152,9 +151,9 @@ class BigDataJobScheduler( AgentModule ):
           jobInfo = getJobFromTaskQueue['Value']
           jobID = jobInfo['jobId']
           jobAttrInfo = jobDB.getJobAttributes( jobID )
-          jobParamsInfo = jobDB.getJobParameters( jobID )
-          jobParamsInfo = jobDB.getAtticJobParameters( jobID )
-          jobParamsInfo = jobDB.getInputData( jobID )
+          #jobParamsInfo = jobDB.getJobParameters( jobID )
+          #jobParamsInfo = jobDB.getAtticJobParameters( jobID )
+          #jobParamsInfo = jobDB.getInputData( jobID )
 
           if not jobAttrInfo['OK']:
             self.log.error( 'Could not get Job Attributes', jobAttrInfo['Message'] )
@@ -162,7 +161,17 @@ class BigDataJobScheduler( AgentModule ):
           jobInfoUniq = jobAttrInfo['Value']
           jobName = jobInfoUniq['JobName']
           self.pendingTaskQueueJobs[tq][jobID] = jobName
-          jobsToSubmit = self.matchingJobsForBDSubmission( jobName,
+
+
+          result = jobDB.getJobJDL( jobID, True )
+          classAdJob = ClassAd( result['Value'] )
+          arguments = 0
+          if classAdJob.lookupAttribute( 'Arguments' ):
+            arguments = classAdJob.getAttributeString( 'Arguments' )
+          if not classAdJob.lookupAttribute( 'Arguments' ):
+            continue
+
+          jobsToSubmit = self.matchingJobsForBDSubmission( arguments,
                                                        runningEndPointName,
                                                        runningEndPointDict['BigDataSoftware'],
                                                        runningEndPointDict['BigDataSoftwareVersion'],
@@ -187,15 +196,23 @@ class BigDataJobScheduler( AgentModule ):
                                                         'SiteName': runningEndPointDict['SiteName'],
                                                         'PublicIP': runningEndPointDict['PublicIP'],
                                                         'User': runningEndPointDict['User'],
-                                                        'Port': runningEndPointDict['Port'] }
+                                                        'Port': runningEndPointDict['Port'],
+                                                        'Arguments': arguments }
             del self.pendingTaskQueueJobs[tq][jobID]
           else:
             self.log.error( jobsToSubmit )
         self.log.info( 'Pending Jobs from TaskQueue, which not matching after: ', self.pendingTaskQueueJobs )
         for tq in self.pendingTaskQueueJobs.keys():
           for jobid in self.pendingTaskQueueJobs[tq].keys():
+            result = jobDB.getJobJDL( jobid, True )
+            classAdJob = ClassAd( result['Value'] )
+            arguments = 0
+            if classAdJob.lookupAttribute( 'Arguments' ):
+              arguments = classAdJob.getAttributeString( 'Arguments' )
+            if not classAdJob.lookupAttribute( 'Arguments' ):
+              continue
             #do the match with the runningEndPoint
-            jobsToSubmit = self.matchingJobsForBDSubmission( self.pendingTaskQueueJobs[tq][jobid],
+            jobsToSubmit = self.matchingJobsForBDSubmission( arguments,
                                                              runningEndPointName,
                                                              runningEndPointDict['BigDataSoftware'],
                                                              runningEndPointDict['BigDataSoftwareVersion'],
@@ -220,7 +237,8 @@ class BigDataJobScheduler( AgentModule ):
                                                           'SiteName': runningEndPointDict['SiteName'],
                                                           'PublicIP': runningEndPointDict['PublicIP'],
                                                           'User': runningEndPointDict['User'],
-                                                          'Port': runningEndPointDict['Port'] }
+                                                          'Port': runningEndPointDict['Port'],
+                                                          'Arguments': arguments  }
               del self.pendingTaskQueueJobs[tq][jobid]
             else:
              self.log.error( jobsToSubmit )
@@ -250,12 +268,13 @@ class BigDataJobScheduler( AgentModule ):
           PublicIP = JobsToSubmitDict[runningEndPointName]['PublicIP']
           User = JobsToSubmitDict[runningEndPointName]['User']
           Port = JobsToSubmitDict[runningEndPointName]['Port']
+          Arguments = JobsToSubmitDict[runningEndPointName]['Arguments']
           numBigDataJobsAllowed = JobsToSubmitDict[runningEndPointName]['NumBigDataJobsAllowedToSubmit']
 
           ret = pool.generateJobAndQueueIt( director.submitBigDataJobs,
                                             args = ( endpoint, numBigDataJobsAllowed, runningSiteName, NameNode,
                                                      BigDataSoftware, BigDataSoftwareVersion, HLLName, HLLVersion,
-                                                     PublicIP, Port, jobIDs, runningEndPointName, jobName, User ),
+                                                     PublicIP, Port, jobIDs, runningEndPointName, jobName, User, Arguments ),
                                             oCallback = self.callBack,
                                             oExceptionCallback = director.exceptionCallBack,
                                             blocking = False )
@@ -272,33 +291,52 @@ class BigDataJobScheduler( AgentModule ):
 
     return DIRAC.S_OK()
 
-  def matchingJobsForBDSubmission( self, jobName, bigdataendpoint, BigDataSoftware,
+  def matchingJobsForBDSubmission( self, arguments, bigdataendpoint, BigDataSoftware,
                                    BigDataSoftwareVersion, HLLName, HLLVersion ):
     """
      Jobs matching, first with the dataset and the SITE, find in the Database the matching with the Dataset key
      As the second step the endpoind is matched with the resulting SITES and in the case of 
      was matching, in the third step the job will be matched with the bigdatasoft of the SITE.
     """
+    if arguments == 0:
+      self.log.error( "Error reading the job arguments for BigData Submission:", arguments )
+      return "Error"
+
     self.log.info( "bigdataendpoint", bigdataendpoint )
     self.log.info( "BigDataSoftware", BigDataSoftware )
     self.log.info( "BigDataSoftwareVersion", BigDataSoftwareVersion )
     self.log.info( "HLLName", HLLName )
     self.log.info( "HLLVersion", HLLVersion )
 
-    jobNameSplitted = re.split( '_', jobName )
+    jobNameSplitted = re.split( ' ', arguments )
 
-    jobBigDataSoft = jobNameSplitted[1]
-    jobBigDataVersion = jobNameSplitted[2]
-    jobHHLSoft = jobNameSplitted[3]
-    jobHHLVersion = jobNameSplitted[4]
-    jobDataset = jobNameSplitted[5]
+    jobBigDataSoft = jobNameSplitted[0]
+    if jobBigDataSoft not in BigDataDB.validSoftware:
+      self.log.error( "Argument %s for valid B.D. software is not in the list of accepted:" % ( jobBigDataSoft ), BigDataDB.validSoftware )
+      return "Error"
+
+    jobBigDataVersion = jobNameSplitted[1]
+    if jobBigDataVersion not in BigDataDB.validSoftwareVersion:
+      self.log.error( "Argument %s for valid B.D. software version is not in the list of accepted:" % ( jobBigDataVersion ), BigDataDB.validSoftwareVersion )
+      return "Error"
+
+    jobHHLSoft = jobNameSplitted[2]
+    if jobHHLSoft not in BigDataDB.validHighLevelLang:
+      self.log.error( "Argument %s for valid B.D. H.L. software is not in the list of accepted:" % ( jobHHLSoft ), BigDataDB.validHighLevelLang )
+      return "Error"
+
+    jobHHLVersion = jobNameSplitted[3]
+    #if jobHHLVersion not in BigDataDB.validHighLevelLangVersion:
+    #  self.log.error( "Argument %s for valid B.D. H.L. software version is not in the list of accepted:" % ( jobHHLVersion ), BigDataDB.validHighLevelLangVersion )
+    #  return "Error"
+
+    jobDataset = jobNameSplitted[4]
 
     JobSiteNames = BigDataDB.getSiteNameByDataSet( jobDataset );
     for SiteName in JobSiteNames:
       if bigdataendpoint in SiteName:
         if ( jobBigDataSoft == BigDataSoftware ) and ( jobBigDataVersion == BigDataSoftwareVersion ) and ( HLLName == "none" ):
           return( "OK" )
-          self.submitPilotsForTaskQueue( x )
         if ( jobBigDataSoft == BigDataSoftware ) and ( jobBigDataVersion == BigDataSoftwareVersion ) and ( HLLName == jobHHLSoft ) and ( HLLVersion == jobHHLVersion ):
           return( "OK" )
         else:

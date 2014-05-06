@@ -30,7 +30,7 @@ class BigDataDirector( SoftBigDataDirector ):
     """
     SoftBigDataDirector.configureFromSection( self, mySection )
 
-  def _submitBigDataJobs( self, NameNode, Port, jobID, PublicIP, runningEndPointName, User, JobName ):
+  def _submitBigDataJobs( self, NameNode, Port, jobID, PublicIP, runningEndPointName, User, JobName, Arguments ):
 
     endpointsPath = "/Resources/BigDataEndPoints"
     self.log.info( 'BigDataDirector:submitBigDataJobs:getConfigInfo:' )
@@ -58,7 +58,7 @@ class BigDataDirector( SoftBigDataDirector ):
       if driverversion == "hdv1":
         if HHLName == "none":
           self.log.info( "Hadoop Job Submission" )
-          hdv1 = HadoopV1( NameNode, Port, jobID, PublicIP, User, JobName )
+          hdv1 = HadoopV1( NameNode, Port, jobID, PublicIP, User, JobName, Arguments )
           result = hdv1.submitNewBigJob()
           if not result[ 'OK' ]:
             return result
@@ -71,7 +71,7 @@ class BigDataDirector( SoftBigDataDirector ):
       if driverversion == "hdv2":
         if HHLName == "none":
           self.log.info( "Hadoop Job Submission" )
-          hdv2 = HadoopV2( NameNode, Port, jobID, PublicIP, User, JobName )
+          hdv2 = HadoopV2( NameNode, Port, jobID, PublicIP, User, JobName, Arguments )
           result = hdv2.submitNewBigJob()
           if not result[ 'OK' ]:
             return result
