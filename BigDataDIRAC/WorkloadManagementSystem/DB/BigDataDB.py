@@ -12,7 +12,9 @@ import types
 from DIRAC                import gConfig, S_ERROR, S_OK
 from DIRAC.Core.Base.DB   import DB
 from DIRAC.Core.Utilities import DEncode, Time
-from DIRAC.WorkloadManagementSystem.Client.ServerUtils import jobDB
+
+from DIRAC.WorkloadManagementSystem.Client.ServerUtils        import jobDB
+from DIRAC.Core.DISET.RPCClient                               import RPCClient
 
 class BigDataDB( DB ):
 
@@ -294,6 +296,16 @@ class BigDataDB( DB ):
     sqlUpdate = 'UPDATE %s SET BdJobSoftwareID= "%s" WHERE %s = %s' % ( tableName, HadoopID, idName, JobID )
     return self._update( sqlUpdate )
 
+  def updateHadoopIDAndJobStatus( self, JobID, HadoopID ):
+    """
+    Insert HadoopID
+    """
+    jobDB.setJobAttribute( JobID, "MinorStatus", "MapReducing Step, running with JobID: " + HadoopID )
+
+    tableName, _validStates, idName = self.__getTypeTuple( 'job' )
+    sqlUpdate = 'UPDATE %s SET BdJobSoftwareID= "%s" WHERE %s = %s' % ( tableName, HadoopID, idName, JobID )
+    return self._update( sqlUpdate )
+
   def setJobStatus( self, JobID, status ):
     """
     Insert HadoopID
@@ -316,32 +328,71 @@ class BigDataDB( DB ):
     return S_OK( result )
 
   def setIntoJobDBStatus( self, jobID, status, JobGroup, Site, jobBDSoftwareName ):
-
-    returned = jobDB.setJobStatus( jobID, status )
-
+    jobReport = RPCClient( 'WorkloadManagement/JobStateUpdate' )
     if status == "Running":
-      jobDB.setJobAttribute( jobID, "MinorStatus", "MapReducing Step" )
-      jobDB.setJobAttribute( jobID, "JobType", "User" )
-      jobDB.setJobAttribute( jobID, "ApplicationStatus", "Running with JobID: " + jobBDSoftwareName )
-      jobDB.setJobAttribute( jobID, "JobGroup", JobGroup )
-      jobDB.setJobAttribute( jobID, "Site", Site )
+      self.log.verbose( 'setJobStatus(%s,%s,%s,%s)' % ( jobID,
+                                                        status,
+                                                        "Running with JobID: " + jobBDSoftwareName,
+                                                        'BigDataMonitoring@%s' % Site ) )
+      jobStatus = jobReport.setJobStatus( int( jobID ),
+                                          status,
+                                          "MapReducing Step, running with JobID: " + jobBDSoftwareName,
+                                          'BigDataMonitoring@%s' % Site )
+      if not jobStatus['OK']:
+        self.log.warn( jobStatus['Message'] )
+      jobSite = jobReport.setJobSite( int( jobID ), Site )
+      self.log.verbose( 'setJobSite(%s,%s)' % ( jobID, Site ) )
+      if not jobSite['OK']:
+        self.log.warn( jobSite['Message'] )
+      jobDB.setJobAttribute( jobID, "ApplicationStatus", "Running MapReduce" )
     if status == "Submitted":
       if ( jobBDSoftwareName != "" ):
-        jobDB.setJobAttribute( jobID, "MinorStatus", "Job in Queue with JobId:" + jobBDSoftwareName )
-        jobDB.setJobAttribute( jobID, "ApplicationStatus", "Job in queue" )
+        jobStatus = jobReport.setJobStatus( int( jobID ),
+                                            status,
+                                            "Job in Queue with JobId:" + jobBDSoftwareName,
+                                            'BigDataMonitoring@%s' % Site )
+        self.log.verbose( 'setJobStatus(%s,%s,%s,%s)' % ( jobID,
+                                                          status,
+                                                          "Job in Queue with JobId:" + jobBDSoftwareName,
+                                                          'BigDataMonitoring@%s' % Site ) )
+        if not jobStatus['OK']:
+          self.log.warn( jobStatus['Message'] )
+        jobSite = jobReport.setJobSite( int( jobID ), Site )
+        self.log.verbose( 'setJobSite(%s,%s)' % ( jobID, Site ) )
+        if not jobSite['OK']:
+          self.log.warn( jobSite['Message'] )
+        jobDB.setJobAttribute( jobID, "ApplicationStatus", "Job in Queue" )
       else:
-        jobDB.setJobAttribute( jobID, "MinorStatus", "Unknown Status" )
-        jobDB.setJobAttribute( jobID, "ApplicationStatus", "Unknown Status in BDSoftware" )
-      jobDB.setJobAttribute( jobID, "JobType", "User" )
-      jobDB.setJobAttribute( jobID, "JobGroup", JobGroup )
-      jobDB.setJobAttribute( jobID, "Site", Site )
+        jobStatus = jobReport.setJobStatus( int( jobID ),
+                                            status = 'Rescheduled',
+                                            application = "Unknown Status",
+                                            sendFlag = True )
+        self.log.verbose( 'setJobStatus(%s,%s,%s,%s)' % ( jobID,
+                                                          'Rescheduled',
+                                                          "Unknown Status",
+                                                          'BigDataMonitoring@%s' % Site ) )
+        if not jobStatus['OK']:
+          self.log.warn( jobStatus['Message'] )
+        jobSite = jobReport.setJobSite( int( jobID ), Site )
+        self.log.verbose( 'setJobSite(%s,%s)' % ( jobID, Site ) )
+        if not jobSite['OK']:
+          self.log.warn( jobSite['Message'] )
     if status == "Done":
-      jobDB.setJobAttribute( jobID, "ApplicationStatus", "MapReducing Process Finished" )
-      jobDB.setJobAttribute( jobID, "MinorStatus", "Execution Complete" )
-
-    if not returned['OK']:
-      return S_ERROR( 'Failed to insert Status Job into JobDB' )
-
+      self.log.verbose( 'setJobStatus(%s,%s,%s,%s)' % ( jobID,
+                                                        status,
+                                                        "MapReducing Process Finished",
+                                                        'BigDataMonitoring@%s' % Site ) )
+      jobStatus = jobReport.setJobStatus( int( jobID ),
+                                          status,
+                                          "MapReducing Process Finished",
+                                          'BigDataMonitoring@%s' % Site )
+      if not jobStatus['OK']:
+        self.log.warn( jobStatus['Message'] )
+      jobSite = jobReport.setJobSite( int( jobID ), Site )
+      self.log.verbose( 'setJobSite(%s,%s)' % ( jobID, Site ) )
+      if not jobSite['OK']:
+        self.log.warn( jobSite['Message'] )
+      jobDB.setJobAttribute( jobID, "ApplicationStatus", "MapReduce Complete" )
     return S_OK( 'OK' )
 
   def insertBigDataJob( self, JobID, JobName, LastUpdate, NameNode,

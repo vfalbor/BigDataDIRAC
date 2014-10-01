@@ -9,7 +9,7 @@ from DIRAC.WorkloadManagementSystem.Client.ServerUtils        import jobDB
 from DIRAC.FrameworkSystem.Client.ProxyManagerClient        import gProxyManager
 
 from BigDataDIRAC.WorkloadManagementSystem.private.ConnectionUtils import ConnectionUtils
-from BigDataDIRAC.WorkloadManagementSystem.Client.HadoopV1Client import HadoopV1Client
+from BigDataDIRAC.WorkloadManagementSystem.Client.HadoopV2Client import HadoopV2Client
 
 from DIRAC.Interfaces.API.Dirac import Dirac
 
@@ -20,7 +20,7 @@ class HadoopV2:
   An Hadoop V.2 provides the functionality of Hadoop that is required to use it for infrastructure.
   """
 
-  def __init__( self, NameNode, Port, jobID, PublicIP, User, JobName, Arguments ):
+  def __init__( self, NameNode, Port, jobID, PublicIP, User, JobName, Dataset ):
 
     self.__tmpSandBoxDir = "/tmp/"
 
@@ -30,7 +30,7 @@ class HadoopV2:
     self.__publicIP = PublicIP
     self.__User = User
     self.__JobName = JobName
-    self.__Arguments = Arguments
+    self.__Dataset = Dataset
 
     self.defaultProxyLength = gConfig.getValue( '/Registry/DefaultProxyLifeTime', 86400 * 5 )
 
@@ -40,7 +40,7 @@ class HadoopV2:
     self.log.info( "Hadoop Version 2, no HHL, PublicIP: %s" % ( PublicIP ) )
     self.log.info( "Hadoop Version 2, no HHL, User: %s" % ( User ) )
     self.log.info( "Hadoop Version 2, no HHL, JobName: %s" % ( JobName ) )
-    self.log.info( "Hadoop Version 2, no HHL, Arguments: %s" % ( Arguments ) )
+    self.log.info( "Hadoop Version 2, no HHL, Dataset: %s" % ( Dataset ) )
 
   def submitNewBigJob( self ):
 
@@ -57,7 +57,7 @@ class HadoopV2:
         temp_file.write( self.jobWrapper() )
     self.log.info( 'Writting temporal Hadoop Job.xml' )
 
-    HadoopV1cli = HadoopV1Client( self.__User , self.__publicIP )
+    HadoopV1cli = HadoopV2Client( self.__User , self.__publicIP )
     returned = HadoopV1cli.dataCopy( tempPath, self.__tmpSandBoxDir )
     self.log.info( 'Copy the job contain to the Hadoop Master: ', returned )
 
@@ -75,12 +75,51 @@ class HadoopV2:
     self.log.info( 'Launch Hadoop job to the Hadoop Master: ', returned )
 
     if not returned['OK']:
+      return S_ERROR( returned['Message'] )
+    else:
+      self.log.info( 'Hadoop Job ID: ', returned['Value'] )
+
+    return S_OK( returned['Value'] )
+
+  def submitNewBigPilot( self ):
+
+    tempPath = self.__tmpSandBoxDir + str( self.__jobID )
+    dirac = Dirac()
+    if not os.path.exists( tempPath ):
+      os.makedirs( tempPath )
+
+    settingJobSandBoxDir = dirac.getInputSandbox( self.__jobID, tempPath )
+    self.log.info( 'Writting temporal SandboxDir in Server', settingJobSandBoxDir )
+
+    jobXMLName = "job:" + str( self.__jobID ) + '.xml'
+    with open( os.path.join( tempPath, jobXMLName ), 'wb' ) as temp_file:
+        temp_file.write( self.jobWrapper() )
+    self.log.info( 'Writting temporal Hadoop Job.xml' )
+
+    HadoopV2cli = HadoopV2Client( self.__User , self.__publicIP )
+    #returned = HadoopV1cli.dataCopy( tempPath, self.__tmpSandBoxDir )
+    #self.log.info( 'Copy the job contain to the Hadoop Master: ', returned )
+
+    jobInfo = jobDB.getJobAttributes( self.__jobID )
+    if not jobInfo['OK']:
+      return S_ERROR( jobInfo['Value'] )
+    proxy = ""
+    jobInfo = jobInfo['Value']
+    if gProxyManager.userHasProxy( jobInfo["OwnerDN"], jobInfo["OwnerGroup"] ):
+      proxy = gProxyManager.downloadProxyToFile( jobInfo["OwnerDN"], jobInfo["OwnerGroup"] )
+    else:
+      proxy = self.__requestProxyFromProxyManager( jobInfo["OwnerDN"], jobInfo["OwnerGroup"] )
+
+    returned = HadoopV2cli.submitPilotJob( tempPath, jobXMLName, proxy['chain'] )
+
+    self.log.info( 'Launch Hadoop pilot to the Hadoop Master: ', returned )
+
+    if not returned['OK']:
       return S_ERROR( returned['Value'] )
     else:
-      hadoopID = self.getHadoopJobValue( returned['Value']['Value'] )
-      self.log.info( 'Hadoop Job ID: ', hadoopID )
+      self.log.info( 'Hadoop Job ID: ', returned['Value'] )
 
-    return S_OK( hadoopID )
+    return S_OK( returned['Value'] )
 
   def __requestProxyFromProxyManager( self, ownerDN, ownerGroup ):
     """Retrieves user proxy with correct role for job and sets up environment to
@@ -102,15 +141,16 @@ class HadoopV2:
     chain = retVal[ 'Value' ]
     return S_OK( chain )
 
-  def getHadoopJobValue( self, jobOutput ):
-    value = re.split( " ", jobOutput[1] )
-    long = len( value )
-
-    return value[long - 1]
-
   def jobWrapper( self ):
-    jobNameSplitted = re.split( ' ', self.__Arguments )
     tempPath = self.__tmpSandBoxDir + str( self.__jobID ) + "/InputSandbox" + str( self.__jobID )
+
+    dataset = re.split( "/", self.__Dataset )
+    count = 0
+    datasetname = ""
+    for dir in dataset:
+      count = count + 1
+      if ( count > 2 ):
+        datasetname = datasetname + "/" + dir
 
     wrapperContent = """<?xml version="1.0" encoding="UTF-8" standalone="no"?>
                         <configuration>
@@ -130,8 +170,8 @@ class HadoopV2:
                             <name>mapred.job.classpath</name>
                             <value>%(jarsPath)s</value>
                           </property>
-                        </configuration> """ % { 'datasetname': jobNameSplitted[4], \
-                                               'outputfile': tempPath + "/" + self.__JobName + "_" + str( self.__jobID ), \
+                        </configuration> """ % { 'datasetname': datasetname, \
+                                               'outputfile': tempPath + "/" + self.__JobName.replace( " ", "" ) + "_" + str( self.__jobID ), \
                                                'jobname': self.__JobName, \
                                                'jarsPath': tempPath }
     return wrapperContent

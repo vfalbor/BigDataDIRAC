@@ -6,10 +6,13 @@
 
 from DIRAC import S_OK, S_ERROR, gConfig
 
-from BigDataDIRAC.Resources.BigData.SoftBigDataDirector           import SoftBigDataDirector
-from BigDataDIRAC.WorkloadManagementSystem.Client.HadoopV1        import HadoopV1
-from BigDataDIRAC.WorkloadManagementSystem.Client.HadoopV2        import HadoopV2
-from BigDataDIRAC.WorkloadManagementSystem.Client.Twister        import Twister
+from BigDataDIRAC.Resources.BigData.SoftBigDataDirector                      import SoftBigDataDirector
+from BigDataDIRAC.WorkloadManagementSystem.Client.HadoopV1                   import HadoopV1
+from BigDataDIRAC.WorkloadManagementSystem.Client.HadoopV2                   import HadoopV2
+from BigDataDIRAC.WorkloadManagementSystem.Client.HadoopV1Interactive        import HadoopV1Interactive
+from BigDataDIRAC.WorkloadManagementSystem.Client.HadoopV2Interactive        import HadoopV2Interactive
+from BigDataDIRAC.WorkloadManagementSystem.Client.HiveV1                     import HiveV1
+from BigDataDIRAC.WorkloadManagementSystem.Client.Twister                    import Twister
 
 __RCSID__ = '$Id: $'
 
@@ -30,7 +33,7 @@ class BigDataDirector( SoftBigDataDirector ):
     """
     SoftBigDataDirector.configureFromSection( self, mySection )
 
-  def _submitBigDataJobs( self, NameNode, Port, jobID, PublicIP, runningEndPointName, User, JobName, Arguments ):
+  def _submitBigDataJobs( self, NameNode, Port, jobID, PublicIP, runningEndPointName, User, JobName, dataset, UsePilot, IsInteractive ):
 
     endpointsPath = "/Resources/BigDataEndPoints"
     self.log.info( 'BigDataDirector:submitBigDataJobs:getConfigInfo:' )
@@ -58,29 +61,53 @@ class BigDataDirector( SoftBigDataDirector ):
       if driverversion == "hdv1":
         if HHLName == "none":
           self.log.info( "Hadoop Job Submission" )
-          hdv1 = HadoopV1( NameNode, Port, jobID, PublicIP, User, JobName, Arguments )
-          result = hdv1.submitNewBigJob()
+          hdv1 = HadoopV1( NameNode, Port, jobID, PublicIP, User, JobName, dataset )
+          if ( UsePilot == '1' ):
+            result = hdv1.submitNewBigPilot()
+          if ( IsInteractive == '1' ):
+            hdv1 = HadoopV1Interactive( NameNode, Port, jobID, PublicIP, User, JobName, dataset )
+            result = hdv1.submitNewBigJob()
+          else:
+            result = hdv1.submitNewBigJob()
           if not result[ 'OK' ]:
             return result
           bdjobID = result['Value']
           return S_OK( bdjobID )
-        if HHLName == "Pig":
+        if HHLName == "pig":
           self.log.info( "Hadoop Pig Job Submission" )
-        if HHLName == "Hive":
-          self.log.info( "Hadoop Pig Job Submission" )
+        if HHLName == "hive":
+          self.log.info( "Hadoop-Hive Job Submission" )
+          hive1 = HiveV1( NameNode, Port, jobID, PublicIP, User, JobName, dataset )
+          result = hive1.submitNewBigJob()
+          if not result[ 'OK' ]:
+            return result
+          bdjobID = result['Value']
+          return S_OK( bdjobID )
       if driverversion == "hdv2":
         if HHLName == "none":
           self.log.info( "Hadoop Job Submission" )
-          hdv2 = HadoopV2( NameNode, Port, jobID, PublicIP, User, JobName, Arguments )
-          result = hdv2.submitNewBigJob()
+          hdv2 = HadoopV2( NameNode, Port, jobID, PublicIP, User, JobName, dataset )
+          if ( UsePilot == '1' ):
+            result = hdv2.submitNewBigPilot()
+          if ( IsInteractive == '1' ):
+            hdv2 = HadoopV2Interactive( NameNode, Port, jobID, PublicIP, User, JobName, dataset )
+            result = hdv2.submitNewBigJob()
+          else:
+            result = hdv2.submitNewBigJob()
           if not result[ 'OK' ]:
             return result
           bdjobID = result['Value']
           return S_OK( bdjobID )
-        if HHLName == "Pig":
+        if HHLName == "pig":
           self.log.info( "Hadoop Pig Job Submission" )
-        if HHLName == "Hive":
-          self.log.info( "Hadoop Pig Job Submission" )
+        if HHLName == "hive":
+          self.log.info( "Hadoop-Hive Job Submission" )
+          hive1 = HiveV1( NameNode, Port, jobID, PublicIP, User, JobName, dataset )
+          result = hive1.submitNewBigJob()
+          if not result[ 'OK' ]:
+            return result
+          bdjobID = result['Value']
+          return S_OK( bdjobID )
 
     if driver == 'twister':
       twister = Twister( endpoint )

@@ -11,6 +11,7 @@
 import random, time, re, os, glob, shutil, sys, base64, bz2, tempfile, stat, string
 from numpy.random import poisson
 from random       import shuffle
+from datetime     import datetime
 
 # DIRAC
 import DIRAC
@@ -21,7 +22,8 @@ from DIRAC.Core.Utilities.ThreadPool                          import ThreadPool
 from DIRAC.WorkloadManagementSystem.Client.ServerUtils        import jobDB
 from DIRAC.WorkloadManagementSystem.Client.SandboxStoreClient import SandboxStoreClient
 from DIRAC.Core.Utilities.File                                import getGlobbedTotalSize, getGlobbedFiles
-from DIRAC.Interfaces.API.Dirac import Dirac
+from DIRAC.Interfaces.API.Dirac                               import Dirac
+from DIRAC.AccountingSystem.Client.Types.Job                  import Job as AccountingJob
 
 from BigDataDIRAC.Resources.BigData.BigDataDirector           import BigDataDirector
 from BigDataDIRAC.WorkloadManagementSystem.Client.ServerUtils import BigDataDB
@@ -61,6 +63,8 @@ class BigDataJobMonitoring( AgentModule ):
     self.sandboxClient = SandboxStoreClient()
     self.failedFlag = True
     self.sandboxSizeLimit = 1024 * 1024 * 10
+    self.fileList = 0
+    self.outputSandboxSize = 0
 
     self.cleanDataAfterFinish = True
 
@@ -98,19 +102,43 @@ class BigDataJobMonitoring( AgentModule ):
                     self.log.info( "Hadoop V.1 Monitoring submmission command with Hadoop jobID: ", getSoftIdAndSiteName[0][0] )
                     from BigDataDIRAC.WorkloadManagementSystem.Client.HadoopV1Client import HadoopV1Client
                     HadoopV1cli = HadoopV1Client( self.monitoringEndPoints[runningEndPoint]['User'] ,
-                                                  self.monitoringEndPoints[runningEndPoint]['PublicIP'] )
+                                                  self.monitoringEndPoints[runningEndPoint]['PublicIP'] ,
+                                                  self.monitoringEndPoints[runningEndPoint]['Port'] )
                     JobStatus = HadoopV1cli.jobStatus( getSoftIdAndSiteName[0][0],
                                                        self.monitoringEndPoints[runningEndPoint]['User'],
                                                        self.monitoringEndPoints[runningEndPoint]['PublicIP'] )
+                    if ( JobStatus['OK'] == True ) and ( self.monitoringEndPoints[runningEndPoint]['IsInteractive'] == "1" ):
+                      if ( JobStatus['Value'][1].strip() == "Succeded" ):
+                        result = HadoopV1cli.newJob( self.__tmpSandBoxDir, jobId[0], getSoftIdAndSiteName[0][0] )
+
+                        if ( result['OK'] == True ):
+                          result = BigDataDB.updateHadoopIDAndJobStatus( jobId[0], result['Value'] )
+                          BigDataDB.setJobStatus( jobId[0], "Running" )
+                          JobStatus['OK'] = False
+                        else:
+                          self.log.info( "New result from new Job", result )
                     if JobStatus['OK'] == True:
                       if ( JobStatus['Value'][1].strip() == "Succeded" ):
                         BigDataDB.setJobStatus( jobId[0], "Done" )
-                        self.__updateSandBox( jobId[0],
-                                             self.monitoringEndPoints[runningEndPoint]['BigDataSoftware'],
-                                             self.monitoringEndPoints[runningEndPoint]['BigDataSoftwareVersion'] ,
-                                             self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLName'],
-                                             self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLVersion'],
-                                             HadoopV1cli )
+                        if ( self.monitoringEndPoints[runningEndPoint]['IsInteractive'] == "1" ):
+                          self.__updateInteractiveSandBox( jobId[0],
+                                               self.monitoringEndPoints[runningEndPoint]['BigDataSoftware'],
+                                               self.monitoringEndPoints[runningEndPoint]['BigDataSoftwareVersion'] ,
+                                               self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLName'],
+                                               self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLVersion'],
+                                               HadoopV1cli )
+                        else:
+                          self.__updateSandBox( jobId[0],
+                                               self.monitoringEndPoints[runningEndPoint]['BigDataSoftware'],
+                                               self.monitoringEndPoints[runningEndPoint]['BigDataSoftwareVersion'] ,
+                                               self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLName'],
+                                               self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLVersion'],
+                                               HadoopV1cli )
+                        getStatus = HadoopV1cli.jobCompleteStatus( getSoftIdAndSiteName[0][0] )
+                        if getStatus['OK']:
+                          result = self.getJobFinalStatusInfo( getStatus['Value'][1] )
+                        if result['OK']:
+                          self.sendJobAccounting( result['Value'], jobId[0] )
                         if self.cleanDataAfterFinish:
                           self.__deleteData( jobId[0], HadoopV1cli )
                       if ( JobStatus['Value'][1].strip() == "Unknown" ):
@@ -128,24 +156,124 @@ class BigDataJobMonitoring( AgentModule ):
                     JobStatus = HadoopV2cli.jobStatus( getSoftIdAndSiteName[0][0],
                                                        self.monitoringEndPoints[runningEndPoint]['User'],
                                                        self.monitoringEndPoints[runningEndPoint]['PublicIP'] )
+                    if ( JobStatus['OK'] == True ) and ( self.monitoringEndPoints[runningEndPoint]['IsInteractive'] == "1" ):
+                      if ( JobStatus['Value'].strip() == "Succeded" ):
+                        result = HadoopV2cli.newJob( self.__tmpSandBoxDir, jobId[0], getSoftIdAndSiteName[0][0] )
+
+                        if ( result['OK'] == True ):
+                          result = BigDataDB.updateHadoopIDAndJobStatus( jobId[0], result['Value'] )
+                          BigDataDB.setJobStatus( jobId[0], "Running" )
+                          JobStatus['OK'] = False
+                        else:
+                          self.log.info( "New result from new Job", result )
                     if JobStatus['OK'] == True:
                       if ( JobStatus['Value'] == "Succeded" ):
                         BigDataDB.setJobStatus( jobId[0], "Done" )
-                        self.__updateSandBox( jobId[0],
-                                             self.monitoringEndPoints[runningEndPoint]['BigDataSoftware'],
-                                             self.monitoringEndPoints[runningEndPoint]['BigDataSoftwareVersion'] ,
-                                             self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLName'],
-                                             self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLVersion'],
-                                             HadoopV2cli )
-                        if cleanDataAfterFinish:
-                          self.__deleteData( jobId[0], HadoopV2cli )
+                        if ( self.monitoringEndPoints[runningEndPoint]['IsInteractive'] == "1" ):
+                          self.__updateInteractiveSandBox( jobId[0],
+                                               self.monitoringEndPoints[runningEndPoint]['BigDataSoftware'],
+                                               self.monitoringEndPoints[runningEndPoint]['BigDataSoftwareVersion'] ,
+                                               self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLName'],
+                                               self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLVersion'],
+                                               HadoopV2cli )
+                        else:
+                          self.__updateSandBox( jobId[0],
+                                               self.monitoringEndPoints[runningEndPoint]['BigDataSoftware'],
+                                               self.monitoringEndPoints[runningEndPoint]['BigDataSoftwareVersion'] ,
+                                               self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLName'],
+                                               self.monitoringEndPoints[runningEndPoint]['HighLevelLanguage']['HLLVersion'],
+                                               HadoopV2cli )
+                        getStatus = HadoopV2cli.jobCompleteStatus( getSoftIdAndSiteName[0][0] )
+                        if getStatus['OK']:
+                          result = self.getJobFinalStatusInfo( getStatus['Value'][1] )
+                        if result['OK']:
+                          self.sendJobAccounting( result['Value'], jobId[0] )
+                        #if self.cleanDataAfterFinish:
+                        #  self.__deleteData( jobId[0], HadoopV2cli )
                       if ( JobStatus['Value'] == "Unknown" ):
                         BigDataDB.setJobStatus( jobId[0], "Submitted" )
                       if ( JobStatus['Value'] == "Running" ):
                         BigDataDB.setJobStatus( jobId[0], "Running" )
-
-
     return DIRAC.S_OK()
+
+  def sendJobAccounting( self, dataFromBDSoft, jobId ):
+    accountingReport = AccountingJob()
+    accountingReport.setStartTime()
+
+    result = jobDB.getJobAttributes( jobId )
+    getting = result['Value']
+    if dataFromBDSoft['CPUTime'] == 0:
+      cpuTime = 0
+      if getting['EndExecTime'] != 'None':
+        epoch = datetime( 1970, 1, 1 )
+        td = datetime.strptime( getting['EndExecTime'], "%Y-%m-%d %H:%M:%S" ) - epoch
+        EndExecTime = ( td.microseconds + ( td.seconds + td.days * 24 * 3600 ) * 10 ** 6 ) / 1e6
+        td = datetime.strptime( getting['SubmissionTime'], "%Y-%m-%d %H:%M:%S" ) - epoch
+        SubmissionTime = ( td.microseconds + ( td.seconds + td.days * 24 * 3600 ) * 10 ** 6 ) / 1e6
+        cpuTime = ( EndExecTime - SubmissionTime )
+    else:
+      cpuTime = dataFromBDSoft['CPUTime'] / 1000
+
+    acData = {
+            'User' : getting['Owner'],
+            'UserGroup' : getting['OwnerGroup'],
+            'JobGroup' : 'cesga',
+            'JobType' : 'User',
+            'JobClass' : 'unknown',
+            'ProcessingType' : 'unknown',
+            'FinalMajorStatus' : getting['Status'],
+            'FinalMinorStatus' : getting['MinorStatus'],
+            'CPUTime' : cpuTime,
+            'Site' : getting['Site'],
+            # Based on the factor to convert raw CPU to Normalized units (based on the CPU Model)
+            'NormCPUTime' : 0,
+            'ExecTime' : cpuTime,
+            'InputDataSize' : dataFromBDSoft['InputDataSize'],
+            'OutputDataSize' : dataFromBDSoft['OutputDataSize'],
+            'InputDataFiles' : dataFromBDSoft['InputDataFiles'],
+            'OutputDataFiles' : len( self.fileList ),
+            'DiskSpace' : 0,
+            'InputSandBoxSize' : 0,
+            'OutputSandBoxSize' : self.outputSandboxSize,
+            'ProcessedEvents' : 0
+            }
+    accountingReport.setEndTime()
+    accountingReport.setValuesFromDict( acData )
+    self.log.debug( "Info for accounting: ", acData )
+    result = accountingReport.commit()
+    self.log.debug( "Accounting insertion: ", result )
+    return result
+
+  def getJobFinalStatusInfo( self, jobData ):
+    JobOutputInfo = {}
+
+    resulting = re.search( "Read=(\d+)", jobData )
+    if resulting != None:
+      JobOutputInfo["InputDataSize"] = int( resulting.group( 0 ).split( "=" )[1] )
+    else:
+      JobOutputInfo["InputDataSize"] = 0
+
+    resulting = re.search( "Written=(\d+)", jobData )
+    if resulting != None:
+      JobOutputInfo["OutputDataSize"] = int( resulting.group( 0 ).split( "=" )[1] )
+    else:
+      JobOutputInfo["OutputDataSize"] = 0
+
+    resulting = re.search( "Map input records=(\d+)", jobData )
+    if resulting != None:
+      JobOutputInfo["InputDataFiles"] = int( resulting.group( 0 ).split( "=" )[1] )
+    else:
+      JobOutputInfo["InputDataFiles"] = 0
+
+    resulting = re.search( "CPU.*?=(\d+)", jobData )
+    if resulting != None:
+      JobOutputInfo["CPUTime"] = int( resulting.group( 0 ).split( "=" )[1] )
+    else:
+      JobOutputInfo["CPUTime"] = 0
+
+    JobOutputInfo["ExecTime"] = 0
+
+    return S_OK( JobOutputInfo )
 
   def __deleteData( self, jobid, cli ):
     source = self.__tmpSandBoxDir + str( jobid )
@@ -156,13 +284,71 @@ class BigDataJobMonitoring( AgentModule ):
       return S_ERROR( 'Data can not be deleted' )
     return 'Data deleted'
 
+  def __updateInteractiveSandBox( self, jobid, software, version, hll, hllversion, cli ):
+    #Detele content of InputSandbox
+
+    jobInfo = BigDataDB.getJobIDInfo( jobid )
+    source = self.__tmpSandBoxDir + str( jobid ) + "/*_out"
+    dest = self.__tmpSandBoxDir + str( jobid )
+    result = 0
+
+    result = cli.delHadoopData( self.__tmpSandBoxDir + str( jobid ) + "/InputSandbox" + str( jobid ) )
+    self.log.debug( 'ATENTION::Deleting InputSandBox Contain:', result )
+
+    result = cli.getdata( dest, source )
+    self.log.debug( 'Step 0:getting data from hadoop:', result )
+    if not result['OK']:
+      self.log.error( 'Error to get the data from BigData Cluster to DIRAC:', result )
+
+    self.log.debug( 'Step:1:GetFilePaths:' )
+    outputSandbox = self.get_filepaths( self.__tmpSandBoxDir + str( jobid ) )
+    self.log.debug( 'Step:2:OutputSandBox:', self.__tmpSandBoxDir + str( jobid ) )
+    self.log.debug( 'Step:2:OutputSandBox:', outputSandbox )
+    resolvedSandbox = self.__resolveOutputSandboxFiles( outputSandbox )
+
+    self.log.debug( 'Step:3:ResolveSandbox:', resolvedSandbox )
+    if not resolvedSandbox['OK']:
+      self.log.warn( 'Output sandbox file resolution failed:' )
+      self.log.warn( resolvedSandbox['Message'] )
+      self.__report( 'Failed', 'Resolving Output Sandbox' )
+    self.fileList = resolvedSandbox['Value']['Files']
+    missingFiles = resolvedSandbox['Value']['Missing']
+    if missingFiles:
+      self.jobReport.setJobParameter( 'OutputSandboxMissingFiles', ', '.join( missingFiles ), sendFlag = False )
+
+    if self.fileList and jobid:
+      self.outputSandboxSize = getGlobbedTotalSize( self.fileList )
+      self.log.info( 'Attempting to upload Sandbox with limit:', self.sandboxSizeLimit )
+
+      result = self.sandboxClient.uploadFilesAsSandboxForJob( self.fileList, jobid,
+                                                         'Output', self.sandboxSizeLimit ) # 1024*1024*10
+      if not result['OK']:
+        self.log.error( 'Output sandbox upload failed with message', result['Message'] )
+        if result.has_key( 'SandboxFileName' ):
+          outputSandboxData = result['SandboxFileName']
+          self.log.info( 'Attempting to upload %s as output data' % ( outputSandboxData ) )
+          outputData.append( outputSandboxData )
+          self.jobReport.setJobParameter( 'OutputSandbox', 'Sandbox uploaded to grid storage', sendFlag = False )
+          self.jobReport.setJobParameter( 'OutputSandboxLFN',
+                                          self.__getLFNfromOutputFile( outputSandboxData )[0], sendFlag = False )
+        else:
+          self.log.info( 'Could not get SandboxFileName to attempt upload to Grid storage' )
+          return S_ERROR( 'Output sandbox upload failed and no file name supplied for failover to Grid storage' )
+      else:
+        # Do not overwrite in case of Error
+        if not self.failedFlag:
+          self.__report( 'Completed', 'Output Sandbox Uploaded' )
+        self.log.info( 'Sandbox uploaded successfully' )
+
+    return "OK"
+
   def __updateSandBox( self, jobid, software, version, hll, hllversion, cli ):
     jobInfo = BigDataDB.getJobIDInfo( jobid )
 
     source = self.__tmpSandBoxDir + str( jobid ) + "/InputSandbox" + str( jobid ) + "/" + \
-      self.__getJobName( jobInfo[0][0] ) + "_" + str( jobid )
+      self.__getJobName( jobInfo[0][0] ).replace( " ", "" ) + "_" + str( jobid )
     dest = self.__tmpSandBoxDir + str( jobid ) + "/" + \
-      self.__getJobName( jobInfo[0][0] ) + "_" + str( jobid )
+      self.__getJobName( jobInfo[0][0] ).replace( " ", "" ) + "_" + str( jobid )
     result = 0
     if ( ( software == "hadoop" ) and ( version == "hdv1" ) and ( hll == "none" ) ):
       result = cli.getData( source , dest )
@@ -182,16 +368,16 @@ class BigDataJobMonitoring( AgentModule ):
       self.log.warn( 'Output sandbox file resolution failed:' )
       self.log.warn( resolvedSandbox['Message'] )
       self.__report( 'Failed', 'Resolving Output Sandbox' )
-    fileList = resolvedSandbox['Value']['Files']
+    self.fileList = resolvedSandbox['Value']['Files']
     missingFiles = resolvedSandbox['Value']['Missing']
     if missingFiles:
       self.jobReport.setJobParameter( 'OutputSandboxMissingFiles', ', '.join( missingFiles ), sendFlag = False )
 
-    if fileList and jobid:
-      self.outputSandboxSize = getGlobbedTotalSize( fileList )
+    if self.fileList and jobid:
+      self.outputSandboxSize = getGlobbedTotalSize( self.fileList )
       self.log.info( 'Attempting to upload Sandbox with limit:', self.sandboxSizeLimit )
 
-      result = self.sandboxClient.uploadFilesAsSandboxForJob( fileList, jobid,
+      result = self.sandboxClient.uploadFilesAsSandboxForJob( self.fileList, jobid,
                                                          'Output', self.sandboxSizeLimit ) # 1024*1024*10
       if not result['OK']:
         self.log.error( 'Output sandbox upload failed with message', result['Message'] )
@@ -335,6 +521,7 @@ class BigDataJobMonitoring( AgentModule ):
     self.monitoringEndPoints[endPoint]['URL'] = monitoringBDEndPointDict['URL']
     self.monitoringEndPoints[endPoint]['User'] = monitoringBDEndPointDict['User']
     self.monitoringEndPoints[endPoint]['PublicIP'] = monitoringBDEndPointDict['PublicIP']
+    self.monitoringEndPoints[endPoint]['IsInteractive'] = monitoringBDEndPointDict['IsInteractive']
 
     self.monitoringEndPoints[endPoint]['HighLevelLanguage'] = monitoringBDEndPointDict['HighLevelLanguage']
 

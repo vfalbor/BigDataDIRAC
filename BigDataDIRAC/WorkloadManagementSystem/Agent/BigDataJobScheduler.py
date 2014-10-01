@@ -25,22 +25,23 @@
 
 import random, time, re
 import DIRAC
+from DIRAC  import gLogger, S_OK, S_ERROR
 
 from numpy.random import poisson
 from random       import shuffle
 
 # DIRAC
-from DIRAC                                             import gConfig
-from DIRAC.Core.Base.AgentModule                       import AgentModule
-from DIRAC.Core.Utilities.ThreadPool                   import ThreadPool
-from DIRAC.WorkloadManagementSystem.DB.TaskQueueDB     import maxCPUSegments
-from DIRAC.WorkloadManagementSystem.Client.ServerUtils import taskQueueDB
-from DIRAC.WorkloadManagementSystem.Client.ServerUtils import jobDB
-
+from DIRAC                                                    import gConfig
+from DIRAC.Core.Base.AgentModule                              import AgentModule
+from DIRAC.Core.Utilities.ThreadPool                          import ThreadPool
+from DIRAC.WorkloadManagementSystem.DB.TaskQueueDB            import maxCPUSegments
+from DIRAC.WorkloadManagementSystem.Client.ServerUtils        import taskQueueDB
+from DIRAC.WorkloadManagementSystem.Client.ServerUtils        import jobDB
+from DIRAC.Resources.Catalog.FileCatalog                      import FileCatalog
 from BigDataDIRAC.Resources.BigData.BigDataDirector           import BigDataDirector
 from BigDataDIRAC.WorkloadManagementSystem.Client.ServerUtils import BigDataDB
-from DIRAC.Core.Utilities.ClassAd.ClassAdLight      import ClassAd
-from DIRAC.Interfaces.API.Dirac import Dirac
+from DIRAC.Core.Utilities.ClassAd.ClassAdLight                import ClassAd
+from DIRAC.Interfaces.API.Dirac                               import Dirac
 
 __RCSID__ = "$Id: $"
 
@@ -55,7 +56,7 @@ class BigDataJobScheduler( AgentModule ):
     import threading
 
     self.__tmpSandBoxDir = "/tmp/"
-
+    self.jobDataset = ""
     self.am_setOption( "PollingTime", 60.0 )
 
     self.am_setOption( "ThreadStartDelay", 1 )
@@ -146,14 +147,9 @@ class BigDataJobScheduler( AgentModule ):
             self.log.error( 'Could not get Job and FromTaskQueue', getJobFromTaskQueue['Message'] )
             return getJobFromTaskQueue
 
-          #get the job info and get the job attributes and 
-          #do the match with the runningEndPoint
           jobInfo = getJobFromTaskQueue['Value']
           jobID = jobInfo['jobId']
           jobAttrInfo = jobDB.getJobAttributes( jobID )
-          #jobParamsInfo = jobDB.getJobParameters( jobID )
-          #jobParamsInfo = jobDB.getAtticJobParameters( jobID )
-          #jobParamsInfo = jobDB.getInputData( jobID )
 
           if not jobAttrInfo['OK']:
             self.log.error( 'Could not get Job Attributes', jobAttrInfo['Message'] )
@@ -168,15 +164,16 @@ class BigDataJobScheduler( AgentModule ):
           arguments = 0
           if classAdJob.lookupAttribute( 'Arguments' ):
             arguments = classAdJob.getAttributeString( 'Arguments' )
-          if not classAdJob.lookupAttribute( 'Arguments' ):
-            continue
+          #if not classAdJob.lookupAttribute( 'Arguments' ):
+          #  continue
 
           jobsToSubmit = self.matchingJobsForBDSubmission( arguments,
                                                        runningEndPointName,
                                                        runningEndPointDict['BigDataSoftware'],
                                                        runningEndPointDict['BigDataSoftwareVersion'],
                                                        runningEndPointDict['HighLevelLanguage']['HLLName'],
-                                                       runningEndPointDict['HighLevelLanguage']['HLLVersion'] )
+                                                       runningEndPointDict['HighLevelLanguage']['HLLVersion'],
+                                                       jobID )
           if ( jobsToSubmit == "OK" ):
             if directorName not in bigDataJobsToSubmit:
               bigDataJobsToSubmit[directorName] = {}
@@ -197,6 +194,8 @@ class BigDataJobScheduler( AgentModule ):
                                                         'PublicIP': runningEndPointDict['PublicIP'],
                                                         'User': runningEndPointDict['User'],
                                                         'Port': runningEndPointDict['Port'],
+                                                        'UsePilot': runningEndPointDict['UsePilot'],
+                                                        'IsInteractive': runningEndPointDict['IsInteractive'],
                                                         'Arguments': arguments }
             del self.pendingTaskQueueJobs[tq][jobID]
           else:
@@ -209,15 +208,16 @@ class BigDataJobScheduler( AgentModule ):
             arguments = 0
             if classAdJob.lookupAttribute( 'Arguments' ):
               arguments = classAdJob.getAttributeString( 'Arguments' )
-            if not classAdJob.lookupAttribute( 'Arguments' ):
-              continue
+            #if not classAdJob.lookupAttribute( 'Arguments' ):
+            #  continue
             #do the match with the runningEndPoint
             jobsToSubmit = self.matchingJobsForBDSubmission( arguments,
                                                              runningEndPointName,
                                                              runningEndPointDict['BigDataSoftware'],
                                                              runningEndPointDict['BigDataSoftwareVersion'],
                                                              runningEndPointDict['HighLevelLanguage']['HLLName'],
-                                                             runningEndPointDict['HighLevelLanguage']['HLLVersion'] )
+                                                             runningEndPointDict['HighLevelLanguage']['HLLVersion'],
+                                                             jobid )
             if ( jobsToSubmit == "OK" ):
               if directorName not in bigDataJobsToSubmit:
                 bigDataJobsToSubmit[directorName] = {}
@@ -238,6 +238,8 @@ class BigDataJobScheduler( AgentModule ):
                                                           'PublicIP': runningEndPointDict['PublicIP'],
                                                           'User': runningEndPointDict['User'],
                                                           'Port': runningEndPointDict['Port'],
+                                                          'UsePilot': runningEndPointDict['UsePilot'],
+                                                          'IsInteractive': runningEndPointDict['IsInteractive'],
                                                           'Arguments': arguments  }
               del self.pendingTaskQueueJobs[tq][jobid]
             else:
@@ -268,13 +270,15 @@ class BigDataJobScheduler( AgentModule ):
           PublicIP = JobsToSubmitDict[runningEndPointName]['PublicIP']
           User = JobsToSubmitDict[runningEndPointName]['User']
           Port = JobsToSubmitDict[runningEndPointName]['Port']
+          UsePilot = JobsToSubmitDict[runningEndPointName]['UsePilot']
+          IsInteractive = JobsToSubmitDict[runningEndPointName]['IsInteractive']
           Arguments = JobsToSubmitDict[runningEndPointName]['Arguments']
           numBigDataJobsAllowed = JobsToSubmitDict[runningEndPointName]['NumBigDataJobsAllowedToSubmit']
 
           ret = pool.generateJobAndQueueIt( director.submitBigDataJobs,
                                             args = ( endpoint, numBigDataJobsAllowed, runningSiteName, NameNode,
                                                      BigDataSoftware, BigDataSoftwareVersion, HLLName, HLLVersion,
-                                                     PublicIP, Port, jobIDs, runningEndPointName, jobName, User, Arguments ),
+                                                     PublicIP, Port, jobIDs, runningEndPointName, jobName, User, self.jobDataset, UsePilot, IsInteractive ),
                                             oCallback = self.callBack,
                                             oExceptionCallback = director.exceptionCallBack,
                                             blocking = False )
@@ -292,17 +296,39 @@ class BigDataJobScheduler( AgentModule ):
     return DIRAC.S_OK()
 
   def matchingJobsForBDSubmission( self, arguments, bigdataendpoint, BigDataSoftware,
-                                   BigDataSoftwareVersion, HLLName, HLLVersion ):
+                                   BigDataSoftwareVersion, HLLName, HLLVersion, jobid ):
     """
      Jobs matching, first with the dataset and the SITE, find in the Database the matching with the Dataset key
      As the second step the endpoind is matched with the resulting SITES and in the case of 
      was matching, in the third step the job will be matched with the bigdatasoft of the SITE.
     """
-    if arguments == 0:
-      self.log.error( "Error reading the job arguments for BigData Submission:", arguments )
+    self.jobDataset = ""
+    returned = jobDB.getInputData( jobid )
+    if not returned['OK']:
+      self.log.error( "There is not Input Data stored in the Job" )
       return "Error"
 
-    self.log.info( "bigdataendpoint", bigdataendpoint )
+    if returned['Value'] != []:
+      self.jobDataset = returned['Value'][0]
+
+    if arguments == 0 and self.jobDataset == "":
+      self.log.error( "Error reading the job arguments for BigData Submission:", arguments )
+      return "Error"
+    if arguments == 0 and self.jobDataset != "":
+      self.fileCatalogue = FileCatalog()
+      result = self.fileCatalogue.getReplicas( self.jobDataset )
+      if not result['OK'] or result['Value']['Successful'] == {}:
+        return S_ERROR( result )
+      return_exit = False
+      for SiteName in result['Value']['Successful'][self.jobDataset]:
+        if bigdataendpoint in SiteName:
+            return( "OK" )
+        else:
+            return_exit = True
+      if return_exit:
+        return "Dataset match with SiteName but Site doesn't have the software"
+
+    self.log.info( "BigDataEndpoint", bigdataendpoint )
     self.log.info( "BigDataSoftware", BigDataSoftware )
     self.log.info( "BigDataSoftwareVersion", BigDataSoftwareVersion )
     self.log.info( "HLLName", HLLName )
@@ -330,13 +356,14 @@ class BigDataJobScheduler( AgentModule ):
     #  self.log.error( "Argument %s for valid B.D. H.L. software version is not in the list of accepted:" % ( jobHHLVersion ), BigDataDB.validHighLevelLangVersion )
     #  return "Error"
 
-    jobDataset = jobNameSplitted[4]
-
-    JobSiteNames = BigDataDB.getSiteNameByDataSet( jobDataset );
-    for SiteName in JobSiteNames:
+    #Old-one
+    #JobSiteNames = BigDataDB.getSiteNameByDataSet( self.jobDataset );
+    self.fileCatalogue = FileCatalog()
+    result = self.fileCatalogue.getReplicas( self.jobDataset )
+    if not result['OK'] or result['Value']['Successful'] == {}:
+      return S_ERROR( result )
+    for SiteName in result['Value']['Successful'][self.jobDataset]:
       if bigdataendpoint in SiteName:
-        if ( jobBigDataSoft == BigDataSoftware ) and ( jobBigDataVersion == BigDataSoftwareVersion ) and ( HLLName == "none" ):
-          return( "OK" )
         if ( jobBigDataSoft == BigDataSoftware ) and ( jobBigDataVersion == BigDataSoftwareVersion ) and ( HLLName == jobHHLSoft ) and ( HLLVersion == jobHHLVersion ):
           return( "OK" )
         else:
@@ -366,7 +393,6 @@ class BigDataJobScheduler( AgentModule ):
     # limit the number of pilots according to the number of waiting job in the TaskQueue
     # and the number of already submitted pilots for that TaskQueue
     pilotsToSubmit = min( pilotsToSubmit, int( ( 1 + extraPilotFraction ) * taskQueueJobs ) + extraPilots - waitingPilots )
-
     if pilotsToSubmit <= 0:
       return DIRAC.S_OK( 0 )
     self.log.verbose( 'Submitting %s pilots for TaskQueue %s' % ( pilotsToSubmit, taskQueueID ) )

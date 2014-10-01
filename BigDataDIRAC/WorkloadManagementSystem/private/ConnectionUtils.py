@@ -12,11 +12,12 @@ __RCSID__ = '$Id: $'
 
 class ConnectionUtils:
 
-  def __init__( self, user, host, password = None ):
+  def __init__( self, user, host, port = None, password = None ):
     self.log = gLogger.getSubLogger( "ConnectionUtils" )
     self.user = user
     self.host = host
     self.password = password
+    self.port = port
 
   def __ssh_call( self, command, timeout ):
     try:
@@ -73,6 +74,18 @@ class ConnectionUtils:
     gLogger.info( 'Command Submitted: ', command )
     return self.__ssh_call( command, timeout )
 
+  def sshCallByPort( self, timeout, cmdSeq ):
+    """ Execute remote command via a ssh remote call
+    """
+    command = cmdSeq
+    if type( cmdSeq ) == type( [] ):
+      command = ' '.join( cmdSeq )
+
+    command = "ssh -p %s -l %s %s '%s'" % ( self.port, self.user, self.host, command )
+    gLogger.info( 'Command Submitted: ', command )
+    return self.__ssh_call( command, timeout )
+
+
   def sshOnlyCall( self, timeout, cmdSeq ):
     """ Execute remote command via a ssh remote call
     """
@@ -85,4 +98,14 @@ class ConnectionUtils:
       command = "scp -r %s %s@%s:%s" % ( localFile, self.user, self.host, destinationPath )
     else:
       command = "scp -r %s@%s:%s %s" % ( self.user, self.host, destinationPath, localFile )
+    return self.__ssh_call( command, timeout )
+
+
+  def scpCallByPort( self, timeout, localFile, destinationPath, upload = True ):
+    """ Execute scp copy
+    """
+    if upload:
+      command = "scp -P %s -r %s %s@%s:%s" % ( self.port, localFile, self.user, self.host, destinationPath )
+    else:
+      command = "scp -P %s -r %s@%s:%s %s" % ( self.port, self.user, self.host, destinationPath, localFile )
     return self.__ssh_call( command, timeout )

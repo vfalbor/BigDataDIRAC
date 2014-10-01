@@ -97,6 +97,9 @@ class SoftBigDataDirector:
       self.runningEndPoints[runningEndPointName]['User'] = RunningBDEndPointDict['User']
       self.runningEndPoints[runningEndPointName]['PublicIP'] = RunningBDEndPointDict['PublicIP']
 
+      self.runningEndPoints[runningEndPointName]['UsePilot'] = RunningBDEndPointDict['UsePilot']
+      self.runningEndPoints[runningEndPointName]['IsInteractive'] = RunningBDEndPointDict['IsInteractive']
+
       self.runningEndPoints[runningEndPointName]['HighLevelLanguage'] = RunningBDEndPointDict['HighLevelLanguage']
 
       self.runningEndPoints[runningEndPointName]['Requirements'] = RunningBDEndPointDict['Requirements']
@@ -104,7 +107,7 @@ class SoftBigDataDirector:
 
   def submitBigDataJobs( self, endpoint, numBigDataJobsAllowed, runningSiteName, NameNode,
                          BigDataSoftware, BigDataSoftwareVersion, HLLName, HLLVersion,
-                         PublicIP, Port, jobIds , runningEndPointName, JobName, User, Arguments ):
+                         PublicIP, Port, jobIds , runningEndPointName, JobName, User, dataset, UsePilot, IsInteractive ):
     """
     Big Data job submission with all the parameters of SITE and Job
     """
@@ -123,12 +126,20 @@ class SoftBigDataDirector:
 
     self.log.info( 'Director:submitBigDataJobs:SubmitJob' )
     dictBDJobSubmitted = self._submitBigDataJobs( NameNode, Port, jobIds, PublicIP,
-                                                  runningEndPointName, User, JobName, Arguments )
+                                                  runningEndPointName, User, JobName, dataset, UsePilot, IsInteractive )
 
     if not dictBDJobSubmitted[ 'OK' ]:
       return dictBDJobSubmitted
     bdjobID = dictBDJobSubmitted['Value']
     result = BigDataDB.setHadoopID( jobIds, bdjobID )
+    if not result[ 'OK' ]:
+      S_ERROR( "BigData ID not updated" )
+
+    result = BigDataDB.setIntoJobDBStatus( jobIds, "Submitted", "",
+                                           runningSiteName, bdjobID )
+    if not result[ 'OK' ]:
+      S_ERROR( "JobDB of BigData Soft not updated" )
+
     self.log.info( 'Director:submitBigDataJobs:JobSubmitted' )
 
     return S_OK( "OK" )
