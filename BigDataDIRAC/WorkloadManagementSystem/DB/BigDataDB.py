@@ -68,12 +68,12 @@ class BigDataDB( DB ):
                                    'Indexes': { 'His_JobStatus': [ 'His_JobStatus' ] },
                                  }
 
-  tablesDesc[ 'temp_BD_DataSetCatalog' ] = { 'Fields' : { 'BdLFNID' : 'BIGINT UNSIGNED AUTO_INCREMENT NOT NULL',
-                                          'LFN' : 'VARCHAR(32) NOT NULL',
-                                          'SiteName' : 'VARCHAR(32) NOT NULL',
-                                             },
-                                   'PrimaryKey' : 'BdLFNID'
-                                 }
+  #tablesDesc[ 'temp_BD_DataSetCatalog' ] = { 'Fields' : { 'BdLFNID' : 'BIGINT UNSIGNED AUTO_INCREMENT NOT NULL',
+  #                                        'LFN' : 'VARCHAR(32) NOT NULL',
+  #                                        'SiteName' : 'VARCHAR(32) NOT NULL',
+  #                                           },
+  #                                 'PrimaryKey' : 'BdLFNID'
+  #                               }
 
   def __init__( self, maxQueueSize = 10 ):
 
