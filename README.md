@@ -17,4 +17,4 @@ v0.r2:
         
         Creating part for interacting with FileCatalog
         
-        Tested with 500 jobs
+        Tested with 500 simulations
