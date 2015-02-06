@@ -4,7 +4,7 @@
 # Author : Victor Fernandez
 ########################################################################
 """
-  Provide uniform interface to backend for local and remote clients (ie Director Agents)
+  This python class move the data from BigDataDB to AccountingJobDB
 """
 
 __RCSID__ = "$Id: $"
