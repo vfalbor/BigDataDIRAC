@@ -28,7 +28,7 @@ def initializeBigDataJobManagerHandler( _serviceInfo ):
   gBigDataDB.declareStalledJobs()
 
   if gBigDataDB._connected:
-    gThreadScheduler.addPeriodicTask( 60 * 15, gBigDataDB.declareStalledJobs )
+    gThreadScheduler.addPeriodicTask( 60 * 30, gBigDataDB.declareStalledJobs )
     return S_OK()
 
   return S_ERROR()
